@@ -13,14 +13,14 @@ permissions:
   id-token: write
 
 concurrency:
-  group: alz-smb-bootstrap
+  group: alz-demo-bootstrap
   cancel-in-progress: false
 
 jobs:
   bootstrap:
     if: inputs.confirmation == 'BOOTSTRAP'
     runs-on: [self-hosted, Windows, X64, alz]
-    environment: alz-bootstrap
+    environment: demo
     timeout-minutes: 90
     defaults:
       run:
@@ -30,7 +30,7 @@ jobs:
       SECURITY_CONTACT_EMAIL: ${{ vars.ALZ_SECURITY_CONTACT_EMAIL }}
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c"
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       ARM_USE_OIDC: "true"
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
@@ -43,7 +43,7 @@ jobs:
       - name: Check prerequisites and persistent output
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($name in 'ALZ_OUTPUT_PATH', 'SECURITY_CONTACT_EMAIL', 'ARM_CLIENT_ID', 'ARM_TENANT_ID') {
+          foreach ($name in 'ALZ_OUTPUT_PATH', 'SECURITY_CONTACT_EMAIL', 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
               throw "Missing GitHub environment variable: $name. See alz\README.md."
             }
@@ -70,7 +70,7 @@ jobs:
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c"
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Bootstrap to persistent local folder
         run: |

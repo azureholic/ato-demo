@@ -9,7 +9,9 @@ Single-region Azure Landing Zones configuration based on the official
 - Hub VNet: `10.100.0.0/16`, Azure Firewall Basic and matching Basic policy.
 - Management resources: Log Analytics, AMA managed identity and data collection rules.
 - ALZ management group hierarchy and policies are retained.
-- Shared management/connectivity subscription: `6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c`.
+- Environment: `demo` (GitHub environment, bootstrap resource naming and tags).
+- Shared management/connectivity subscription: supplied through
+  `AZURE_SUBSCRIPTION_ID` in the GitHub `demo` environment, not committed in source.
   It is placed **once**, under `platform`; the dedicated management/connectivity/
   identity/security groups remain available for future subscriptions. Policies
   assigned only to those child groups do not apply to the shared subscription.
@@ -22,7 +24,7 @@ Single-region Azure Landing Zones configuration based on the official
 
 Edit [inputs.yaml](config/inputs.yaml) and
 [platform-landing-zone.tfvars](config/platform-landing-zone.tfvars) as needed.
-An empty parent management group selects the authenticated tenant root. Change
+An empty parent management group selects the explicitly supplied tenant root. Change
 it before bootstrap to deploy below a different existing parent.
 
 Pinned versions: ALZ PowerShell 7.1.5, bootstrap modules v7.3.2, Terraform starter
@@ -38,7 +40,17 @@ Install-Module ALZ -RequiredVersion 7.1.5 -Scope CurrentUser -Repository PSGalle
 Install-Module powershell-yaml -Scope CurrentUser -Repository PSGallery
 ```
 
-Prepare resolved configuration only (no Azure login or Azure changes):
+Load the subscription and tenant settings from the GitHub `demo` environment.
+GitHub CLI authentication is required; Azure login is not needed to prepare files:
+
+```powershell
+$settings = gh variable list --repo azureholic/ato-demo --env demo --json name,value | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Could not load GitHub environment variables.' }
+$env:ARM_SUBSCRIPTION_ID = ($settings | Where-Object name -eq 'AZURE_SUBSCRIPTION_ID').value
+$env:ARM_TENANT_ID = ($settings | Where-Object name -eq 'AZURE_TENANT_ID').value
+```
+
+Prepare resolved configuration only (no Azure changes):
 
 ```powershell
 .\alz\scripts\Initialize-Alz.ps1 -SecurityContactEmail 'security@your-company.example'
@@ -47,8 +59,8 @@ Prepare resolved configuration only (no Azure login or Azure changes):
 When ready, explicitly authorize bootstrap:
 
 ```powershell
-az login
-az account set --subscription 6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c
+az login --tenant $env:ARM_TENANT_ID
+az account set --subscription $env:ARM_SUBSCRIPTION_ID
 .\alz\scripts\Initialize-Alz.ps1 -SecurityContactEmail 'security@your-company.example' -Bootstrap
 ```
 
@@ -57,6 +69,11 @@ RBAC prerequisites, and writes the Terraform starter to `alz\output\local-output
 It does **not** apply the landing zone Terraform. The caller must have the
 permissions needed to create management groups, custom roles/role assignments
 under the configured parent, and bootstrap resources in the subscription.
+
+Alternatively pass `-SubscriptionId` and `-TenantId` directly to the script.
+Both must be non-empty GUIDs; bootstrap also checks the Azure CLI subscription
+and tenant before making changes. The single supplied subscription is used for
+bootstrap, management and connectivity, with only one management group placement.
 
 Keep the entire `alz\output` directory securely backed up. Bootstrap has local
 Terraform state there; the generated landing zone is configured to use Azure
@@ -78,15 +95,17 @@ ephemeral runner would lose the local bootstrap state, so it is intentionally
 not used. Restrict this runner to a trusted/private repository; do not run
 untrusted pull requests on it.
 
-Create a GitHub environment named `alz-bootstrap`, with required reviewers, and
-these environment variables:
+Use the GitHub environment named `demo` and configure required reviewers where
+your GitHub plan supports them. Subscription and tenant variables have been
+created; configure the remaining values before running the workflow:
 
 | Variable | Value |
 | --- | --- |
 | `AZURE_CLIENT_ID` | Client ID of an existing authorized bootstrap identity |
+| `AZURE_SUBSCRIPTION_ID` | Shared bootstrap/management/connectivity subscription |
 | `AZURE_TENANT_ID` | Tenant containing the subscription |
 | `ALZ_SECURITY_CONTACT_EMAIL` | Real security contact mailbox |
-| `ALZ_OUTPUT_PATH` | Persistent absolute path on the runner, e.g. `F:\alz-state\smb` |
+| `ALZ_OUTPUT_PATH` | Persistent absolute path on the runner, e.g. `F:\alz-state\demo` |
 
 The output path must be outside the checkout and runner temporary directory.
 The generated landing zone will be in `<ALZ_OUTPUT_PATH>\local-output`.
@@ -97,10 +116,10 @@ Provision the workflow identity and its permissions out of band before the first
 run. Configure an Entra federated credential with issuer
 `https://token.actions.githubusercontent.com`, audience
 `api://AzureADTokenExchange`, and subject
-`repo:OWNER/REPOSITORY:environment:alz-bootstrap`. No client secret is needed.
+`repo:azureholic/ato-demo:environment:demo`. No client secret is needed.
 This bootstrap identity is separate from the deployment identities created by
 the accelerator; do not assume those identities already authorize this workflow.
 
 Push these files to a GitHub repository, select **Bootstrap ALZ Terraform SMB**
-under Actions, and enter `BOOTSTRAP`. The environment approval gates Azure
-changes. State and plans are not uploaded as workflow artifacts.
+under Actions, and enter `BOOTSTRAP`. If configured, environment approval gates
+Azure changes. State and plans are not uploaded as workflow artifacts.

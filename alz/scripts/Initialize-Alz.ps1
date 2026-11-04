@@ -5,6 +5,10 @@ param(
     [ValidatePattern('^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')]
     [string]$SecurityContactEmail,
 
+    [string]$SubscriptionId = $env:ARM_SUBSCRIPTION_ID,
+
+    [string]$TenantId = $env:ARM_TENANT_ID,
+
     [string]$OutputPath = (Join-Path $PSScriptRoot '..\output'),
 
     [switch]$Bootstrap
@@ -13,6 +17,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+foreach ($setting in @{ SubscriptionId = $SubscriptionId; TenantId = $TenantId }.GetEnumerator()) {
+    $parsedId = [guid]::Empty
+    if (-not [guid]::TryParse($setting.Value, [ref]$parsedId) -or $parsedId -eq [guid]::Empty) {
+        throw "$($setting.Key) must be a non-empty GUID. Supply the parameter or its ARM_SUBSCRIPTION_ID / ARM_TENANT_ID environment variable."
+    }
+}
+
 Import-Module powershell-yaml -ErrorAction Stop
 $alzRoot = Split-Path $PSScriptRoot -Parent
 $outputDirectory = [IO.Path]::GetFullPath($OutputPath)
@@ -20,6 +31,12 @@ $resolvedConfigDirectory = Join-Path $outputDirectory 'config'
 $targetDirectory = Join-Path $outputDirectory 'local-output'
 
 $inputs = Get-Content (Join-Path $alzRoot 'config\inputs.yaml') -Raw | ConvertFrom-Yaml
+$inputs.bootstrap_subscription_id = $SubscriptionId
+$inputs.subscription_ids.management = $SubscriptionId
+$inputs.subscription_ids.connectivity = $SubscriptionId
+if ([string]::IsNullOrWhiteSpace($inputs.root_parent_management_group_id)) {
+    $inputs.root_parent_management_group_id = $TenantId
+}
 $inputs.target_directory = $targetDirectory
 $tfvars = Get-Content (Join-Path $alzRoot 'config\platform-landing-zone.tfvars') -Raw
 $tfvars = $tfvars.Replace('__SECURITY_CONTACT_EMAIL__', $SecurityContactEmail)
@@ -48,7 +65,11 @@ $account = $accountJson | ConvertFrom-Json
 if ($account.id -ne $inputs.bootstrap_subscription_id) {
     throw "Select subscription $($inputs.bootstrap_subscription_id) with az account set before bootstrapping."
 }
+if ($account.tenantId -ne $TenantId) {
+    throw 'The Azure CLI tenant does not match TenantId. Authenticate to the configured tenant before bootstrapping.'
+}
 $env:ARM_SUBSCRIPTION_ID = $inputs.bootstrap_subscription_id
+$env:ARM_TENANT_ID = $TenantId
 
 Deploy-Accelerator `
     -inputConfigFilePaths @($inputsPath, $tfvarsPath) `

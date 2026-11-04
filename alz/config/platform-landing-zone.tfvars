@@ -49,7 +49,7 @@ custom_replacements = {
 tags = {
   deployed_by = "terraform"
   source      = "Azure Landing Zones Accelerator"
-  environment = "smb"
+  environment = "demo"
 }
 
 management_resources_enabled = true
