@@ -1,0 +1,6 @@
+alz/output/
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/tfplan
+**/crash.log

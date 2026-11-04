@@ -1,0 +1,21 @@
+---
+iac_type: "terraform"
+bootstrap_module_name: "alz_local"
+starter_module_name: "platform_landing_zone"
+
+bootstrap_location: "belgiumcentral"
+bootstrap_subscription_id: "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c"
+# Empty selects the authenticated tenant's root management group.
+root_parent_management_group_id: ""
+subscription_ids:
+  management: "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c"
+  connectivity: "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c"
+
+service_name: "alz"
+environment_name: "smb"
+postfix_number: 1
+create_bootstrap_resources_in_azure: true
+# Subscription placement is owned by the landing zone, not bootstrap.
+move_subscriptions_to_target_management_group: false
+storage_account_replication_type: "LRS"
+target_directory: ""
