@@ -1,157 +1,119 @@
-# ALZ Terraform SMB bootstrap
+# ALZ Bicep SMB landing zone
 
-Single-region Azure Landing Zones configuration based on the official
-[SMB hub-and-spoke example](https://github.com/Azure/alz-terraform-accelerator/blob/v17.6.0/templates/platform_landing_zone/examples/smb-single-region/hub-and-spoke-vnet.tfvars).
+This Azure-only platform landing zone uses the official
+[Azure/alz-bicep-accelerator v2.4.0](https://github.com/Azure/alz-bicep-accelerator/tree/v2.4.0)
+templates and their version-pinned Azure Verified Modules. The upstream templates
+and policy library are retained in [bicep/upstream](bicep/upstream), with the MIT
+license. Demo configuration lives in [demo.json](config/demo.json).
 
-## Configuration
+## Baseline
 
-- Region: Belgium Central (`belgiumcentral`), including bootstrap resources.
-- Hub VNet: `10.100.0.0/16`, Azure Firewall Basic and matching Basic policy.
-- Management resources: Log Analytics, AMA managed identity and data collection rules.
-- ALZ management group hierarchy and policies are retained.
-- Environment: `demo` (GitHub environment, bootstrap resource naming and tags).
-- Shared management/connectivity subscription: supplied through
-  `AZURE_SUBSCRIPTION_ID` in the GitHub `demo` environment and resolved into
-  the generated deployment configuration in `platform`.
-  It is placed **once**, under `platform`; the dedicated management/connectivity/
-  identity/security groups remain available for future subscriptions. Policies
-  assigned only to those child groups do not apply to the shared subscription.
+- One region: Belgium Central (`belgiumcentral`).
+- One shared management/connectivity subscription, placed **once** in `platform`.
+  The management, connectivity, identity and security groups remain available for
+  future dedicated subscriptions. Policies assigned only to those child groups
+  do not apply to the shared subscription.
+- Hub VNet `10.100.0.0/16`, Azure Firewall Basic and matching Basic firewall policy.
+- Log Analytics (30-day retention), AMA identity and monitoring collection rules.
+- ALZ management group hierarchy, custom policies, policy initiatives and RBAC.
 - VPN, ExpressRoute, Bastion, private DNS/resolver and a paid DDoS Network
-  Protection plan are disabled. Revisit DNS when adding private endpoints.
-- Paid Defender for Cloud policy settings from the SMB example are retained.
-  Firewall, logging and Defender can incur charges. This is not a free baseline.
-- Network DDoS Protection is not enabled. Evaluate DDoS IP Protection for exposed
-  public IPs, subject to resource/SKU support.
+  Protection plan are disabled. The DDoS policies on connectivity/landing zones
+  and private DNS deployment policy on corp are excluded accordingly.
+- Paid Defender for Cloud settings from the previous SMB configuration remain
+  enabled. Firewall, logging and Defender can incur charges.
+- The Bicep release supplies its own ALZ policy catalog. Migration is not a
+  byte-for-byte translation of the Terraform catalog; review what-if carefully.
 
-Edit [inputs.yaml](config/inputs.yaml) and
-[platform-landing-zone.tfvars](config/platform-landing-zone.tfvars) as needed.
-An empty parent management group selects the explicitly supplied tenant root. Change
-it before bootstrap to deploy below a different existing parent.
+The existing `alz` intermediate root is referenced, not recreated or reparented.
+The ordered deployment stages are logging, hub networking, and one governance
+deployment per management group. Logging and networking are subscription
+deployments; governance targets management group `alz`. Each template is checked
+against ARM's 4 MB size limit. ARM incremental deployments manage the platform without Terraform state,
+deployment stacks or a storage backend.
 
-Pinned versions: ALZ PowerShell 7.1.5, bootstrap modules v7.3.2, Terraform starter
-v17.6.0, accelerator-managed Terraform 1.14.9. Review upgrades deliberately.
+## Local preparation and validation
 
-## Local workflow
-
-Use PowerShell 7. The bootstrap script installs missing `powershell-yaml` and
-ALZ 7.1.5 modules for the current user, registering PSGallery if absent.
-On Windows it installs missing Azure CLI/Git through WinGet; installer elevation
-may still be required. The accelerator downloads Terraform 1.14.9 and its HCL
-parser into the persistent output folder when needed. Azure authentication
-cannot be automated without an already-authorized session.
-
-Load the subscription and tenant settings from the GitHub `demo` environment.
-GitHub CLI authentication is required; Azure login is not needed to prepare files:
+Use PowerShell 7 on Windows x64. One command installs Azure CLI through WinGet if
+missing, downloads Bicep CLI v0.44.1 into an ignored local tool cache, verifies its
+pinned SHA-256 digest, restores the pinned public AVM modules and builds the
+templates/parameters. It does not replace the machine's shared Bicep executable:
 
 ```powershell
-$settings = gh variable list --repo azureholic/ato-demo --env demo --json name,value | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'Could not load GitHub environment variables.' }
-$env:ARM_SUBSCRIPTION_ID = ($settings | Where-Object name -eq 'AZURE_SUBSCRIPTION_ID').value
-$env:ARM_TENANT_ID = ($settings | Where-Object name -eq 'AZURE_TENANT_ID').value
+.\alz\scripts\Initialize-Alz.ps1
 ```
 
-Prepare resolved configuration only (no Azure changes):
+This command makes **no Azure resource changes**. It uses the configured demo
+tenant/subscription unless supplied through `ARM_TENANT_ID`/`ARM_SUBSCRIPTION_ID`
+or explicit parameters; mismatched targets are rejected. Build output goes to
+the ignored `alz\output\bicep` directory, or `-OutputPath`.
+No ALZ PowerShell module, YAML module or Terraform installation is needed.
+CLI installation can require elevation. Public internet access to Microsoft
+Container Registry is needed to restore AVM modules.
+
+Run the local build/configuration tests:
 
 ```powershell
-.\alz\scripts\Initialize-Alz.ps1 -SecurityContactEmail 'security@your-company.example'
+.\alz\tests\Test-InitializeAlz.ps1
 ```
 
-For this demo, with Azure CLI already authenticated to the target subscription,
-this **single command** installs missing dependencies and automatically approves
-the entire bootstrap (not the landing-zone deployment):
+For an authenticated, read-only Azure preview, first select the configured tenant
+and subscription, then run:
 
 ```powershell
-.\alz\scripts\Initialize-Alz.ps1 -SecurityContactEmail 'remcobrosky@microsoft.com' -SubscriptionId '6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c' -TenantId '6e689817-26c3-498a-a758-a45e53e81733' -OutputPath 'D:\alz-bootstrap\ato-demo\alz\state' -Bootstrap
+.\alz\scripts\Invoke-AlzDeployment.ps1 -Operation WhatIf
 ```
 
-Bootstrap creates Azure state storage, deployment identities, management group/
-RBAC prerequisites, and writes the Terraform starter to
-`D:\alz-bootstrap\ato-demo\alz\state\local-output`.
-It does **not** apply the landing zone Terraform. The caller must have the
-permissions needed to create management groups, custom roles/role assignments
-under the configured parent, and bootstrap resources in the subscription.
-
-Alternatively pass `-SubscriptionId` and `-TenantId` directly to the script.
-Both must be non-empty GUIDs; bootstrap also checks the Azure CLI subscription
-and tenant before making changes. The single supplied subscription is used for
-bootstrap, management and connectivity, with only one management group placement.
-
-Keep the entire persistent bootstrap output folder securely backed up. Bootstrap
-has local Terraform state there; platform deployment uses a separate Azure
-Storage backend. Do not lose bootstrap state, run from a fresh output path against
-the same resources, or commit state/plan files. Keep the same output path and
-version pins for reruns. Edit the reviewed deployment source in [platform](platform),
-not the bootstrap-managed copy in `local-output`.
-
-The generated root Terraform files, resolved `.tfvars`/JSON configuration,
-`lib` and `modules` have been copied into [platform](platform).
-The upstream MIT license is retained there. Do not copy the entire bootstrap
-output into Git: exclude `.tools`, bootstrap state, plans, logs, caches, generated
-local deployment scripts and credentials. Identifiers and the security contact
-in the committed configuration are not secrets. Review configuration for secrets
-before copying it again. Commit the provider dependency lock file.
-
-Before deploying the generated landing zone, check Belgium Central service/SKU
-availability and subscription quotas, then initialize the configured backend,
-run `terraform validate`, review `terraform plan`, and explicitly approve apply.
-Review the generated deployment script before using it: it can apply resources.
+The deployment order is declared in [deployments.json](bicep/deployments.json).
+The script checks Azure CLI context before any deployment operation and stops at
+the first failed stage. What-if uses `ProviderNoRbac`: it validates resource
+configuration but does **not** prove all write permissions. First-deployment
+what-if can short-circuit nested templates targeting management groups that do
+not yet exist; inspect all warnings. A successful preview is not an apply or a
+guarantee that every policy/resource will deploy.
 
 ## GitHub Actions
 
-[alz-deploy.yml](../.github/workflows/alz-deploy.yml) deploys the committed platform
-Terraform source using a **GitHub-hosted `windows-latest` runner**, Terraform
-1.14.9 and OIDC. No self-hosted runner or local bootstrap state is needed in CI.
-The previous bootstrap workflow has been removed.
+[alz-deploy.yml](../.github/workflows/alz-deploy.yml) uses a public GitHub-hosted
+`windows-latest` runner and Entra OIDC. It runs only by manual dispatch on `main`.
+The default operation is `what-if`. Actual deployment requires choosing `deploy`
+and entering the exact confirmation `DEPLOY`. Neither pushing code nor running
+what-if deploys the platform.
 
-Use the GitHub environment named `demo` and configure required reviewers where
-your GitHub plan supports them. These environment variables are configured:
+The GitHub `demo` environment needs only:
 
 | Variable | Value |
 | --- | --- |
-| `AZURE_CLIENT_ID` | `4c598517-f198-46b6-a166-931ca6012b52` (`GitHub-ATO-Demos`) |
-| `AZURE_SUBSCRIPTION_ID` | Shared bootstrap/management/connectivity subscription |
-| `AZURE_TENANT_ID` | Tenant containing the subscription |
-| `TF_STATE_RESOURCE_GROUP` | `rg-alz-demo-state-belgiumcentral-001` |
-| `TF_STATE_STORAGE_ACCOUNT` | `stoalzdembel001jfwn` |
-| `TF_STATE_CONTAINER` | `demo-tfstate` |
+| `AZURE_CLIENT_ID` | `4c598517-f198-46b6-a166-931ca6012b52` |
+| `AZURE_TENANT_ID` | `6e689817-26c3-498a-a758-a45e53e81733` |
+| `AZURE_SUBSCRIPTION_ID` | `6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c` |
 
-The backend key is `terraform.tfstate`. The security contact is already resolved
-into the committed configuration; CI does not need `ALZ_SECURITY_CONTACT_EMAIL`
-or `ALZ_OUTPUT_PATH`.
-
-The service principal retains its existing Contributor and Role Based Access
-Control Administrator assignments at the tenant root management group.
-Resource Policy Contributor is assigned on management group `alz`, and Storage
-Blob Data Contributor on the state container. This supplies policy-management
-and backend data access without adding another tenant-root assignment.
-The Entra federated credential `github-azureholic-ato-demo-demo` uses issuer
+The existing federated credential uses issuer
 `https://token.actions.githubusercontent.com`, audience
-`api://AzureADTokenExchange`, and subject
-`repo:azureholic@7915366/ato-demo@1445961666:environment:demo`. This repository
-uses GitHub's immutable OIDC subject format; check it with
-`gh api repos/azureholic/ato-demo/actions/oidc/customization/sub` before
-reconfiguring federation. No client secret is needed.
-This existing service principal is used for CI instead of the separate plan/apply
-managed identities created by local bootstrap.
+`api://AzureADTokenExchange`, and immutable subject
+`repo:azureholic@7915366/ato-demo@1445961666:environment:demo`.
+No client secret is needed. The service principal's existing Contributor and
+RBAC Administrator assignments at the tenant root management group, plus
+Resource Policy Contributor on `alz`, are retained. Verify deployment permissions
+and Belgium Central service/SKU availability and quota before authorizing deploy.
 
-State storage has public network access disabled by default. For each run the
-workflow temporarily enables the endpoint with a default-deny firewall and
-allows only the current runner IPv4 address. Blob access still requires Entra
-authentication; anonymous access and shared keys are disabled. An `always()`
-cleanup step disables public access before removing the runner rule. A forcibly
-terminated runner or failed cleanup requires an administrator to disable public
-access immediately. Workflow concurrency and Terraform state locking prevent
-overlapping runs; do not run a local deployment concurrently.
+Configure required environment reviewers where the GitHub plan supports them.
+Concurrency serializes workflow runs; do not run a local deployment concurrently.
+Deployment is incremental and multi-stage, not transactional: a later failure can
+leave earlier stages deployed. Review changes and rerun deliberately.
 
-If Azure still returns `publicNetworkAccess=Disabled` after the enable request,
-the workflow fails before Terraform. Investigate the storage account's network
-configuration and applicable Azure restrictions; do not remove the firewall or
-enable anonymous/shared-key access to work around it.
+There are no storage firewall changes, temporary IP rules, state containers,
+backend keys or Terraform commands in this workflow. The legacy `TF_STATE_*`
+environment variables are unused and can be removed separately.
 
-Under Actions, select **Deploy ALZ Platform**, run from `main`, and choose
-`plan` (the default) for a read-only Terraform plan. Review the result, region/SKU
-availability and costs before choosing `apply` and typing `APPLY` to authorize
-deployment. Apply creates a fresh plan and applies that exact saved plan in the
-same job; it does not reuse a previous plan run. Environment reviewers, if
-configured, approve the job before it starts. State and plans are not committed
-or uploaded as workflow artifacts.
+## Preserved Terraform bootstrap
+
+The old generated `platform` folder and Terraform configuration were removed.
+The existing Azure bootstrap resources, role assignments and deployment
+identities have **not** been deleted. In particular, state storage remains closed
+to public network access and is not used by Bicep.
+
+The original bootstrap state remains outside this repository at
+`D:\alz-bootstrap\ato-demo\alz\state`. Keep that entire directory securely backed
+up. Do not delete it, rerun bootstrap in a fresh folder, destroy the bootstrap
+stack, or import/redeploy bootstrap-owned resources into Bicep. Existing resource
+cleanup is a separate, explicitly authorized operation.

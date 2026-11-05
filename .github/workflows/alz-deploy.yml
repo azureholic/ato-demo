@@ -1,18 +1,18 @@
-name: Deploy ALZ Platform
+name: Deploy ALZ Platform (Bicep)
 
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Plan only, or deploy the platform landing zones"
+        description: "Preview changes or deploy the platform landing zones"
         required: true
         type: choice
         options:
-          - plan
-          - apply
-        default: plan
+          - what-if
+          - deploy
+        default: what-if
       confirmation:
-        description: "For apply, type APPLY to authorize Azure resources, policy and RBAC changes"
+        description: "For deploy, type DEPLOY to authorize Azure resources, policy and RBAC changes"
         required: false
         type: string
 
@@ -28,22 +28,14 @@ jobs:
   deploy:
     runs-on: windows-latest
     environment: demo
-    timeout-minutes: 120
+    timeout-minutes: 180
     defaults:
       run:
         shell: pwsh
-        working-directory: alz\platform
     env:
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      ARM_USE_OIDC: "true"
-      ARM_USE_CLI: "false"
-      TF_IN_AUTOMATION: "true"
-      TF_INPUT: "false"
-      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
-      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
-      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
       DEPLOYMENT_OPERATION: ${{ inputs.operation }}
       DEPLOYMENT_CONFIRMATION: ${{ inputs.confirmation }}
     steps:
@@ -58,20 +50,14 @@ jobs:
           if ($env:GITHUB_REF -ne 'refs/heads/main') {
             throw 'Run this workflow from main only.'
           }
-          if ($env:DEPLOYMENT_OPERATION -eq 'apply' -and $env:DEPLOYMENT_CONFIRMATION -cne 'APPLY') {
-            throw 'Applying requires explicit APPLY confirmation.'
+          if ($env:DEPLOYMENT_OPERATION -eq 'deploy' -and $env:DEPLOYMENT_CONFIRMATION -cne 'DEPLOY') {
+            throw 'Deploying requires explicit DEPLOY confirmation.'
           }
-          foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID', 'TF_STATE_RESOURCE_GROUP', 'TF_STATE_STORAGE_ACCOUNT', 'TF_STATE_CONTAINER') {
+          foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
               throw "Missing demo environment variable: $name."
             }
           }
-
-      - name: Install pinned Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.14.9
-          terraform_wrapper: false
 
       - name: Azure login with OIDC
         uses: azure/login@v2
@@ -80,73 +66,17 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Allow this runner to access state
+      - name: Build and preview Bicep
+        if: inputs.operation == 'what-if'
         run: |
-          $ErrorActionPreference = 'Stop'
-          $ip = (Invoke-RestMethod -Uri 'https://api.ipify.org').Trim()
-          $address = $null
-          if (-not [IPAddress]::TryParse($ip, [ref]$address) -or $address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
-            throw 'Could not determine a valid runner IPv4 address.'
-          }
-          "STATE_RUNNER_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "STATE_ACCESS_TOUCHED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          az storage account update --name $env:TF_STATE_STORAGE_ACCOUNT --resource-group $env:TF_STATE_RESOURCE_GROUP --public-network-access Enabled --default-action Deny --bypass None --output none
-          if ($LASTEXITCODE -ne 0) { throw 'Could not enable restricted state endpoint access.' }
-          az storage account network-rule add --account-name $env:TF_STATE_STORAGE_ACCOUNT --resource-group $env:TF_STATE_RESOURCE_GROUP --ip-address $ip --output none
-          if ($LASTEXITCODE -ne 0) { throw 'Could not allow the runner IP on state storage.' }
-          $access = az storage account show --name $env:TF_STATE_STORAGE_ACCOUNT --resource-group $env:TF_STATE_RESOURCE_GROUP --query publicNetworkAccess --output tsv
-          if ($LASTEXITCODE -ne 0) { throw 'Could not verify state storage network access.' }
-          if ($access -ne 'Enabled') {
-            throw "Azure returned publicNetworkAccess=$access after the enable request. Resolve the storage network restriction before using a public runner."
-          }
+          .\alz\scripts\Invoke-AlzDeployment.ps1 `
+            -Operation WhatIf `
+            -OutputPath "$env:RUNNER_TEMP\alz-bicep"
 
-      - name: Wait for backend access
+      - name: Build and deploy explicitly authorized Bicep
+        if: inputs.operation == 'deploy'
         run: |
-          $ErrorActionPreference = 'Stop'
-          for ($attempt = 1; $attempt -le 12; $attempt++) {
-            $exists = az storage container exists --account-name $env:TF_STATE_STORAGE_ACCOUNT --name $env:TF_STATE_CONTAINER --auth-mode login --query exists --output tsv --only-show-errors
-            if ($LASTEXITCODE -eq 0) {
-              if ($exists -ne 'true') { throw 'The configured state container does not exist.' }
-              break
-            }
-            if ($attempt -eq 12) { throw 'State backend remains inaccessible after waiting for firewall/RBAC propagation.' }
-            Write-Warning "State access not ready (attempt $attempt/12); retrying in 10 seconds."
-            Start-Sleep -Seconds 10
-          }
-
-      - name: Terraform initialize
-        run: |
-          terraform init -input=false -lockfile=readonly `
-            "-backend-config=resource_group_name=$env:TF_STATE_RESOURCE_GROUP" `
-            "-backend-config=storage_account_name=$env:TF_STATE_STORAGE_ACCOUNT" `
-            "-backend-config=container_name=$env:TF_STATE_CONTAINER" `
-            "-backend-config=key=terraform.tfstate" `
-            "-backend-config=use_azuread_auth=true"
-          if ($LASTEXITCODE -ne 0) { throw 'Terraform initialization failed.' }
-
-      - name: Terraform format and validate
-        run: |
-          terraform fmt -check -recursive
-          if ($LASTEXITCODE -ne 0) { throw 'Terraform formatting check failed.' }
-          terraform validate
-          if ($LASTEXITCODE -ne 0) { throw 'Terraform validation failed.' }
-
-      - name: Terraform plan
-        run: |
-          terraform plan -input=false -lock-timeout=5m "-out=$env:RUNNER_TEMP\alz.tfplan"
-          if ($LASTEXITCODE -ne 0) { throw 'Terraform plan failed.' }
-
-      - name: Terraform apply approved plan
-        if: inputs.operation == 'apply'
-        run: |
-          terraform apply -input=false -lock-timeout=5m "$env:RUNNER_TEMP\alz.tfplan"
-          if ($LASTEXITCODE -ne 0) { throw 'Terraform apply failed.' }
-
-      - name: Disable public state access and remove runner rule
-        if: always() && env.STATE_ACCESS_TOUCHED == 'true'
-        run: |
-          $ErrorActionPreference = 'Stop'
-          az storage account update --name $env:TF_STATE_STORAGE_ACCOUNT --resource-group $env:TF_STATE_RESOURCE_GROUP --public-network-access Disabled --output none
-          if ($LASTEXITCODE -ne 0) { throw 'STATE ACCESS CLEANUP FAILED: disable public network access on state storage immediately.' }
-          az storage account network-rule remove --account-name $env:TF_STATE_STORAGE_ACCOUNT --resource-group $env:TF_STATE_RESOURCE_GROUP --ip-address $env:STATE_RUNNER_IP --output none
-          if ($LASTEXITCODE -ne 0) { throw 'State access is disabled, but removing the runner IP rule failed.' }
+          .\alz\scripts\Invoke-AlzDeployment.ps1 `
+            -Operation Deploy `
+            -Confirmation $env:DEPLOYMENT_CONFIRMATION `
+            -OutputPath "$env:RUNNER_TEMP\alz-bicep"

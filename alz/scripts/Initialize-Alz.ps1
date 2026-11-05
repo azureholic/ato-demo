@@ -1,141 +1,75 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [ValidatePattern('^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')]
-    [string]$SecurityContactEmail,
-
     [string]$SubscriptionId = $env:ARM_SUBSCRIPTION_ID,
-
     [string]$TenantId = $env:ARM_TENANT_ID,
-
-    [string]$OutputPath = (Join-Path $PSScriptRoot '..\output'),
-
-    [switch]$Bootstrap
+    [string]$OutputPath = (Join-Path $PSScriptRoot '..\output\bicep')
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-
+$alzRoot = Split-Path $PSScriptRoot -Parent
+$settings = Get-Content (Join-Path $alzRoot 'config\demo.json') -Raw | ConvertFrom-Json
+if (-not $PSBoundParameters.ContainsKey('SubscriptionId') -and [string]::IsNullOrWhiteSpace($SubscriptionId)) {
+    $SubscriptionId = $settings.subscriptionId
+}
+if (-not $PSBoundParameters.ContainsKey('TenantId') -and [string]::IsNullOrWhiteSpace($TenantId)) {
+    $TenantId = $settings.tenantId
+}
 foreach ($setting in @{ SubscriptionId = $SubscriptionId; TenantId = $TenantId }.GetEnumerator()) {
     $parsedId = [guid]::Empty
     if (-not [guid]::TryParse($setting.Value, [ref]$parsedId) -or $parsedId -eq [guid]::Empty) {
-        throw "$($setting.Key) must be a non-empty GUID. Supply the parameter or its ARM_SUBSCRIPTION_ID / ARM_TENANT_ID environment variable."
+        throw "$($setting.Key) must be a non-empty GUID."
     }
 }
-
-function Install-RequiredModule {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Name,
-        [string]$RequiredVersion
-    )
-
-    $module = Get-Module -ListAvailable -Name $Name
-    if ($RequiredVersion) {
-        $module = $module | Where-Object Version -eq ([version]$RequiredVersion)
-    }
-    if (-not $module) {
-        if (-not (Get-PSRepository | Where-Object Name -eq 'PSGallery')) {
-            Register-PSRepository -Default -ErrorAction Stop
-        }
-        $install = @{
-            Name        = $Name
-            Scope       = 'CurrentUser'
-            Repository  = 'PSGallery'
-            Force       = $true
-            ErrorAction = 'Stop'
-        }
-        if ($RequiredVersion) {
-            $install.RequiredVersion = $RequiredVersion
-        }
-        Write-Host "Installing required PowerShell module: $Name $RequiredVersion"
-        Install-Module @install
-    }
+if ($SubscriptionId -ne $settings.subscriptionId -or $TenantId -ne $settings.tenantId) {
+    throw 'The target does not match config\demo.json. Review the configuration before changing tenants or subscriptions.'
+}
+if ($settings.securityContactEmail -notmatch '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$') {
+    throw 'config\demo.json must contain a valid security contact email address.'
+}
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    if (-not $IsWindows) { throw 'Install Azure CLI before preparing the Bicep deployment.' }
+    Get-Command winget -ErrorAction Stop | Out-Null
+    & winget install --id Microsoft.AzureCLI --exact --source winget --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { throw 'Azure CLI installation failed.' }
+    $env:PATH = "$env:PATH;$([Environment]::GetEnvironmentVariable('PATH', 'Machine'));$([Environment]::GetEnvironmentVariable('PATH', 'User'))"
+    Get-Command az -ErrorAction Stop | Out-Null
+}
+if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
+    throw 'This local preparation script requires Windows x64, matching the GitHub-hosted runner.'
+}
+$bicep = Join-Path $alzRoot 'output\.tools\bicep-0.44.1.exe'
+if (-not (Test-Path -LiteralPath $bicep)) {
+    New-Item -ItemType Directory -Path (Split-Path $bicep -Parent) -Force | Out-Null
+    Write-Host 'Downloading pinned Bicep CLI v0.44.1 into the local tool cache.'
+    Invoke-WebRequest -Uri 'https://github.com/Azure/bicep/releases/download/v0.44.1/bicep-win-x64.exe' -OutFile $bicep
+}
+if ((Get-FileHash -LiteralPath $bicep -Algorithm SHA256).Hash -ne '5153ab5898e70f1f822e0b844ae902a5acc5692f5a6303814af7b202e1072160') {
+    throw 'Bicep CLI checksum mismatch. The downloaded executable will not be run.'
 }
 
-function Install-RequiredCommand {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Name,
-        [Parameter(Mandatory)]
-        [string]$PackageId
-    )
-
-    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        if (-not $IsWindows) {
-            throw "Install $Name before bootstrap on this operating system."
-        }
-        Get-Command winget -ErrorAction Stop | Out-Null
-        Write-Host "Installing required command: $Name ($PackageId)"
-        & winget install --id $PackageId --exact --source winget --silent --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -ne 0) {
-            throw "Installation of $PackageId failed with exit code $LASTEXITCODE."
-        }
-        $env:PATH = "$env:PATH;$([Environment]::GetEnvironmentVariable('PATH', 'Machine'));$([Environment]::GetEnvironmentVariable('PATH', 'User'))"
-        Get-Command $Name -ErrorAction Stop | Out-Null
-    }
-}
-
-Install-RequiredModule -Name powershell-yaml
-Import-Module powershell-yaml -ErrorAction Stop
-$alzRoot = Split-Path $PSScriptRoot -Parent
-$outputDirectory = [IO.Path]::GetFullPath($OutputPath)
-$resolvedConfigDirectory = Join-Path $outputDirectory 'config'
-$targetDirectory = Join-Path $outputDirectory 'local-output'
-
-$inputs = Get-Content (Join-Path $alzRoot 'config\inputs.yaml') -Raw | ConvertFrom-Yaml
-$inputs.bootstrap_subscription_id = $SubscriptionId
-$inputs.subscription_ids.management = $SubscriptionId
-$inputs.subscription_ids.connectivity = $SubscriptionId
-if ([string]::IsNullOrWhiteSpace($inputs.root_parent_management_group_id)) {
-    $inputs.root_parent_management_group_id = $TenantId
-}
-$inputs.target_directory = $targetDirectory
-$tfvars = Get-Content (Join-Path $alzRoot 'config\platform-landing-zone.tfvars') -Raw
-$tfvars = $tfvars.Replace('__SECURITY_CONTACT_EMAIL__', $SecurityContactEmail)
-
-New-Item -ItemType Directory -Path $resolvedConfigDirectory -Force | Out-Null
-$inputsPath = Join-Path $resolvedConfigDirectory 'inputs.json'
-$tfvarsPath = Join-Path $resolvedConfigDirectory 'platform-landing-zone.tfvars'
-$inputs | ConvertTo-Json -Depth 30 | Set-Content $inputsPath -Encoding utf8
-$tfvars | Set-Content $tfvarsPath -Encoding utf8
-Write-Host "Prepared configuration in $resolvedConfigDirectory"
-
-if (-not $Bootstrap) {
-    Write-Host 'No Azure changes made. Add -Bootstrap to run the accelerator.'
-    return
-}
-
-Install-RequiredCommand -Name az -PackageId Microsoft.AzureCLI
-Install-RequiredCommand -Name git -PackageId Git.Git
-$accountJson = & az account show --output json
-if ($LASTEXITCODE -ne 0) {
-    throw 'Azure CLI authentication is required. Run az login first.'
-}
-$account = $accountJson | ConvertFrom-Json
-if ($account.id -ne $inputs.bootstrap_subscription_id) {
-    throw "Select subscription $($inputs.bootstrap_subscription_id) with az account set before bootstrapping."
-}
-if ($account.tenantId -ne $TenantId) {
-    throw 'The Azure CLI tenant does not match TenantId. Authenticate to the configured tenant before bootstrapping.'
-}
-$env:ARM_SUBSCRIPTION_ID = $inputs.bootstrap_subscription_id
+$env:ARM_SUBSCRIPTION_ID = $SubscriptionId
 $env:ARM_TENANT_ID = $TenantId
-
-Install-RequiredModule -Name ALZ -RequiredVersion 7.1.5
-Import-Module ALZ -RequiredVersion 7.1.5 -ErrorAction Stop
-Deploy-Accelerator `
-    -inputConfigFilePaths @($inputsPath, $tfvarsPath) `
-    -output_folder_path $outputDirectory `
-    -bootstrap_module_version 'v7.3.2' `
-    -starter_module_version 'v17.6.0' `
-    -terraform_version '1.14.9' `
-    -skip_alz_module_version_requirements_check `
-    -auto_approve
-
-if (-not (Test-Path (Join-Path $targetDirectory 'terraform.tf'))) {
-    throw "Bootstrap did not produce the Terraform starter in $targetDirectory."
+$outputDirectory = [IO.Path]::GetFullPath($OutputPath)
+New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+$bicepRoot = Join-Path $alzRoot 'bicep'
+$deployments = Get-Content (Join-Path $bicepRoot 'deployments.json') -Raw | ConvertFrom-Json
+foreach ($entry in $deployments) {
+    Write-Host "Building $($entry.name)."
+    $buildJson = & $bicep build-params (Join-Path $bicepRoot "$($entry.name).bicepparam") --stdout
+    if ($LASTEXITCODE -ne 0) { throw "Bicep build failed for $($entry.name)." }
+    $build = ($buildJson -join [Environment]::NewLine) | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace($build.templateJson) -or [string]::IsNullOrWhiteSpace($build.parametersJson)) {
+        throw "Bicep did not return both template and parameters for $($entry.name)."
+    }
+    $build.templateJson | Set-Content (Join-Path $outputDirectory "$($entry.name).template.json") -Encoding utf8
+    $build.parametersJson | Set-Content (Join-Path $outputDirectory "$($entry.name).parameters.json") -Encoding utf8
+    foreach ($extension in 'template', 'parameters') {
+        if ((Get-Item (Join-Path $outputDirectory "$($entry.name).$extension.json")).Length -gt 4MB) {
+            throw "$($entry.name) $extension exceeds the ARM 4 MB limit."
+        }
+    }
 }
-Write-Host "Bootstrap complete. Landing zone files: $targetDirectory"
-Write-Host 'The landing zone itself has NOT been deployed.'
+Write-Host "Bicep templates and parameters prepared in $outputDirectory."
+Write-Host 'No Azure resources were changed. No Terraform state or storage backend is needed.'

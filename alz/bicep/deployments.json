@@ -1,0 +1,16 @@
+[
+  {"name":"logging","scope":"sub"},
+  {"name":"hub-network","scope":"sub"},
+  {"name":"governance-int-root","scope":"mg"},
+  {"name":"governance-platform","scope":"mg"},
+  {"name":"governance-landingzones","scope":"mg"},
+  {"name":"governance-corp","scope":"mg"},
+  {"name":"governance-online","scope":"mg"},
+  {"name":"governance-local","scope":"mg"},
+  {"name":"governance-connectivity","scope":"mg"},
+  {"name":"governance-management","scope":"mg"},
+  {"name":"governance-identity","scope":"mg"},
+  {"name":"governance-security","scope":"mg"},
+  {"name":"governance-sandbox","scope":"mg"},
+  {"name":"governance-decommissioned","scope":"mg"}
+]
