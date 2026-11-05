@@ -67,9 +67,12 @@ The deployment order is declared in [deployments.json](bicep/deployments.json).
 The script checks Azure CLI context before any deployment operation and stops at
 the first failed stage. What-if uses `ProviderNoRbac`: it validates resource
 configuration but does **not** prove all write permissions. First-deployment
-what-if can short-circuit nested templates targeting management groups that do
-not yet exist; inspect all warnings. A successful preview is not an apply or a
-guarantee that every policy/resource will deploy.
+what-if can short-circuit or fail with a read-authorization error for management
+groups that do not yet exist. In particular, subscription placement in the new
+`platform` group cannot be fully previewed before that group exists. Do not
+create the hierarchy merely to make preview pass without deployment approval.
+Inspect all warnings; a successful preview is not an apply or a guarantee that
+every policy/resource will deploy.
 
 ## GitHub Actions
 
@@ -93,8 +96,15 @@ The existing federated credential uses issuer
 `repo:azureholic@7915366/ato-demo@1445961666:environment:demo`.
 No client secret is needed. The service principal's existing Contributor and
 RBAC Administrator assignments at the tenant root management group, plus
-Resource Policy Contributor on `alz`, are retained. Verify deployment permissions
-and Belgium Central service/SKU availability and quota before authorizing deploy.
+Resource Policy Contributor on `alz`, are retained. These roles do not grant
+`Microsoft.Authorization/roleDefinitions/write` or `delete`, which the ALZ custom
+roles require. Before actual deployment, an administrator must approve suitable
+custom-role management permissions on `alz`; Owner on that intermediate root is
+the simplest built-in deployment role. Tenant-root Owner is not required for this
+configuration. Retain the existing resource/RBAC permissions on the shared
+subscription for stages executed before its move under `alz`. No directory
+administrator role or storage data-plane role is needed by this Bicep workflow.
+Verify Belgium Central service/SKU availability and quota before authorizing deploy.
 
 Configure required environment reviewers where the GitHub plan supports them.
 Concurrency serializes workflow runs; do not run a local deployment concurrently.
