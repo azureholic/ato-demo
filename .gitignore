@@ -3,4 +3,9 @@ alz/output/
 **/*.tfstate
 **/*.tfstate.*
 **/tfplan
+**/tfplan.*
+**/*.tfplan
 **/crash.log
+**/crash.*.log
+**/.alzlib/
+**/.terraform.tfstate.lock.info

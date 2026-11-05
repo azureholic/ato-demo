@@ -32,8 +32,14 @@ try {
         $inputs.subscription_ids.management -ne $subscriptionId -or
         $inputs.subscription_ids.connectivity -ne $subscriptionId -or
         $inputs.root_parent_management_group_id -ne $tenantId -or
+        $inputs.target_directory -ne (Join-Path $output 'local-output') -or
         $inputs.environment_name -ne 'demo') {
         throw 'Resolved subscription, tenant or environment configuration is incorrect.'
+    }
+    $tfvars = Get-Content (Join-Path $output 'config\platform-landing-zone.tfvars') -Raw
+    if ($tfvars -notmatch 'defender_email_security_contact\s*=\s*"security@example.test"' -or
+        $tfvars.Contains('__SECURITY_CONTACT_EMAIL__')) {
+        throw 'Security contact was not resolved in the platform configuration.'
     }
     Write-Host 'Configuration rendering and invalid-input tests passed. No Azure changes.'
 } finally {

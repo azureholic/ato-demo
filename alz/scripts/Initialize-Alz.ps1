@@ -24,6 +24,60 @@ foreach ($setting in @{ SubscriptionId = $SubscriptionId; TenantId = $TenantId }
     }
 }
 
+function Install-RequiredModule {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+        [string]$RequiredVersion
+    )
+
+    $module = Get-Module -ListAvailable -Name $Name
+    if ($RequiredVersion) {
+        $module = $module | Where-Object Version -eq ([version]$RequiredVersion)
+    }
+    if (-not $module) {
+        if (-not (Get-PSRepository | Where-Object Name -eq 'PSGallery')) {
+            Register-PSRepository -Default -ErrorAction Stop
+        }
+        $install = @{
+            Name        = $Name
+            Scope       = 'CurrentUser'
+            Repository  = 'PSGallery'
+            Force       = $true
+            ErrorAction = 'Stop'
+        }
+        if ($RequiredVersion) {
+            $install.RequiredVersion = $RequiredVersion
+        }
+        Write-Host "Installing required PowerShell module: $Name $RequiredVersion"
+        Install-Module @install
+    }
+}
+
+function Install-RequiredCommand {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+        [Parameter(Mandatory)]
+        [string]$PackageId
+    )
+
+    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
+        if (-not $IsWindows) {
+            throw "Install $Name before bootstrap on this operating system."
+        }
+        Get-Command winget -ErrorAction Stop | Out-Null
+        Write-Host "Installing required command: $Name ($PackageId)"
+        & winget install --id $PackageId --exact --source winget --silent --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -ne 0) {
+            throw "Installation of $PackageId failed with exit code $LASTEXITCODE."
+        }
+        $env:PATH = "$env:PATH;$([Environment]::GetEnvironmentVariable('PATH', 'Machine'));$([Environment]::GetEnvironmentVariable('PATH', 'User'))"
+        Get-Command $Name -ErrorAction Stop | Out-Null
+    }
+}
+
+Install-RequiredModule -Name powershell-yaml
 Import-Module powershell-yaml -ErrorAction Stop
 $alzRoot = Split-Path $PSScriptRoot -Parent
 $outputDirectory = [IO.Path]::GetFullPath($OutputPath)
@@ -53,10 +107,8 @@ if (-not $Bootstrap) {
     return
 }
 
-Import-Module ALZ -RequiredVersion 7.1.5 -ErrorAction Stop
-foreach ($command in 'az', 'terraform', 'git') {
-    Get-Command $command -ErrorAction Stop | Out-Null
-}
+Install-RequiredCommand -Name az -PackageId Microsoft.AzureCLI
+Install-RequiredCommand -Name git -PackageId Git.Git
 $accountJson = & az account show --output json
 if ($LASTEXITCODE -ne 0) {
     throw 'Azure CLI authentication is required. Run az login first.'
@@ -71,12 +123,15 @@ if ($account.tenantId -ne $TenantId) {
 $env:ARM_SUBSCRIPTION_ID = $inputs.bootstrap_subscription_id
 $env:ARM_TENANT_ID = $TenantId
 
+Install-RequiredModule -Name ALZ -RequiredVersion 7.1.5
+Import-Module ALZ -RequiredVersion 7.1.5 -ErrorAction Stop
 Deploy-Accelerator `
     -inputConfigFilePaths @($inputsPath, $tfvarsPath) `
     -output_folder_path $outputDirectory `
     -bootstrap_module_version 'v7.3.2' `
     -starter_module_version 'v17.6.0' `
     -terraform_version '1.14.9' `
+    -skip_alz_module_version_requirements_check `
     -auto_approve
 
 if (-not (Test-Path (Join-Path $targetDirectory 'terraform.tf'))) {
