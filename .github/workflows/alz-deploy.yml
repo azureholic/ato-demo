@@ -94,6 +94,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not enable restricted state endpoint access.' }
           az storage account network-rule add --account-name $env:TF_STATE_STORAGE_ACCOUNT --resource-group $env:TF_STATE_RESOURCE_GROUP --ip-address $ip --output none
           if ($LASTEXITCODE -ne 0) { throw 'Could not allow the runner IP on state storage.' }
+          $access = az storage account show --name $env:TF_STATE_STORAGE_ACCOUNT --resource-group $env:TF_STATE_RESOURCE_GROUP --query publicNetworkAccess --output tsv
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify state storage network access.' }
+          if ($access -ne 'Enabled') {
+            throw "Azure returned publicNetworkAccess=$access after the enable request. Resolve the storage network restriction before using a public runner."
+          }
 
       - name: Wait for backend access
         run: |

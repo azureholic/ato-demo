@@ -143,6 +143,11 @@ terminated runner or failed cleanup requires an administrator to disable public
 access immediately. Workflow concurrency and Terraform state locking prevent
 overlapping runs; do not run a local deployment concurrently.
 
+If Azure still returns `publicNetworkAccess=Disabled` after the enable request,
+the workflow fails before Terraform. Investigate the storage account's network
+configuration and applicable Azure restrictions; do not remove the firewall or
+enable anonymous/shared-key access to work around it.
+
 Under Actions, select **Deploy ALZ Platform**, run from `main`, and choose
 `plan` (the default) for a read-only Terraform plan. Review the result, region/SKU
 availability and costs before choosing `apply` and typing `APPLY` to authorize
