@@ -66,23 +66,86 @@ and subscription, then run:
 The deployment order is declared in [deployments.json](bicep/deployments.json).
 The script checks Azure CLI context before any deployment operation and stops at
 the first failed stage. What-if uses `ProviderNoRbac`: it validates resource
-configuration but does **not** prove all write permissions. First-deployment
-what-if can short-circuit or fail with a read-authorization error for management
-groups that do not yet exist. In particular, subscription placement in the new
-`platform` group cannot be fully previewed before that group exists. Do not
-create the hierarchy merely to make preview pass without deployment approval.
+configuration but does **not** prove all write permissions. Run the local bootstrap
+below before the first preview: it creates the empty management-group hierarchy,
+so read authorization for subscription placement does not depend on a prior
+platform deployment. What-if remains read-only and uses the same provider
+validation level before and after the first deployment. Nested resources can
+still be short-circuited by ARM when expressions cannot be evaluated.
 Inspect all warnings; a successful preview is not an apply or a guarantee that
 every policy/resource will deploy.
 
 ## GitHub Actions
 
+### Local permission and hierarchy bootstrap
+
+Run this once using your personal Azure CLI login, not the deployment service
+principal. Your user needs permission to manage custom role definitions and
+role assignments on the existing `alz` management group, plus permission to create
+child management groups:
+
+```powershell
+az login --tenant 6e689817-26c3-498a-a758-a45e53e81733
+az account set --subscription 6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c
+.\alz\scripts\Initialize-AlzBootstrap.ps1 -WhatIf
+.\alz\scripts\Initialize-AlzBootstrap.ps1
+```
+
+The script validates the user, tenant, subscription, existing management group
+and deployment identity from [demo.json](config/demo.json). It creates and assigns
+`ALZ Role Definition Writer (alz)` **only on `alz`**, with the single action
+`Microsoft.Authorization/roleDefinitions/write`. Existing roles already provide
+read access. Incremental deployments need create/update, not role-definition
+deletion; no delete, wildcard, data-plane or role-assignment actions are added.
+An existing custom role must match these exact permissions and scope, or the
+script stops for review.
+
+After verifying the persisted custom-role assignment, the script removes the
+deployment identity's direct Owner assignments on `alz`, including the previous
+bootstrap grant. It verifies the final state and can be safely rerun. Unrelated
+assignments and parent scopes are not modified; inherited Owner access, if any,
+produces a warning and requires separate review. The existing conditional RBAC
+Administrator assignment retains its restrictions.
+
+Custom-role write access is still privileged: it can change permissions in custom
+roles. This is the minimal additional action for the current templates, not a
+claim that the pre-existing tenant-root deployment roles are least privilege.
+It does not grant Owner, change OIDC credentials, alter Terraform bootstrap
+resources, or deploy platform workloads.
+The normal [Initialize-Alz.ps1](scripts/Initialize-Alz.ps1) build remains
+read-only with respect to Azure; GitHub does not run this local bootstrap.
+Allow time for RBAC propagation after a new assignment.
+
+The same command compiles the Bicep parameters and creates the empty management
+groups declared by the governance deployment stages, in parent-before-child
+order. It uses those compiled configurations as the source of truth, rather than
+a separate hierarchy list. Existing groups must already have the expected parent;
+bootstrap never reparents them or recreates the existing `alz` root. `-WhatIf`
+builds locally and previews both permission and management-group changes without
+writing to Azure. A rerun verifies existing groups and creates only missing ones.
+
+Bootstrap does **not** move the subscription or deploy policies, logging,
+networking, or other workloads. It is an explicit Azure-changing prerequisite,
+not part of what-if. After bootstrap, dispatch the GitHub workflow to preview the
+platform before any platform deployment. Review all what-if output and warnings,
+then approve the pending `deploy` job only when ready for the platform changes
+and their charges. Reject the deployment if the preview is not acceptable.
+
+Test the local bootstrap without Azure changes:
+
+```powershell
+.\alz\tests\Test-InitializeAlzBootstrap.ps1
+```
+
 [alz-deploy.yml](../.github/workflows/alz-deploy.yml) uses a public GitHub-hosted
 `windows-latest` runner and Entra OIDC. It runs only by manual dispatch on `main`.
-The default operation is `what-if`. Actual deployment requires choosing `deploy`
-and entering the exact confirmation `DEPLOY`. Neither pushing code nor running
-what-if deploys the platform.
+Each run has two jobs: `whatif` previews the changes, then `deploy` waits for
+approval on the `demo` environment. Deployment is skipped if what-if fails.
+There is no operation selector or typed confirmation at dispatch; environment
+approval authorizes deployment. Pushing code does not start this workflow.
 
-The GitHub `demo` environment needs only:
+Create an unprotected `demo-whatif` environment for preview and keep `demo` for
+deployment. Configure these variables on **both** environments:
 
 | Variable | Value |
 | --- | --- |
@@ -94,19 +157,31 @@ The existing federated credential uses issuer
 `https://token.actions.githubusercontent.com`, audience
 `api://AzureADTokenExchange`, and immutable subject
 `repo:azureholic@7915366/ato-demo@1445961666:environment:demo`.
-No client secret is needed. The service principal's existing Contributor and
+Add a second federated credential on the same Entra application, with the same
+issuer and audience and subject
+`repo:azureholic@7915366/ato-demo@1445961666:environment:demo-whatif`.
+Keep the existing `demo` credential unchanged. No client secret is needed.
+The service principal's existing Contributor and
 RBAC Administrator assignments at the tenant root management group, plus
 Resource Policy Contributor on `alz`, are retained. These roles do not grant
-`Microsoft.Authorization/roleDefinitions/write` or `delete`, which the ALZ custom
-roles require. Before actual deployment, an administrator must approve suitable
-custom-role management permissions on `alz`; Owner on that intermediate root is
-the simplest built-in deployment role. Tenant-root Owner is not required for this
+`Microsoft.Authorization/roleDefinitions/write`, which the ALZ custom roles
+require. The local permission bootstrap above adds only that missing action on
+the intermediate root. Role-definition deletion is not needed by these
+incremental deployments. Owner is not required for this
 configuration. Retain the existing resource/RBAC permissions on the shared
 subscription for stages executed before its move under `alz`. No directory
 administrator role or storage data-plane role is needed by this Bicep workflow.
 Verify Belgium Central service/SKU availability and quota before authorizing deploy.
 
-Configure required environment reviewers where the GitHub plan supports them.
+Before dispatching, configure **required reviewers** on `demo` in repository
+Settings > Environments, restrict deployment branches to `main`, and disable
+administrator bypass. Enable prevention of self-review if approval must come
+from another person. Leave `demo-whatif` without required reviewers so preview
+can run before approval. Required reviewers must be supported by the repository's
+GitHub plan/visibility; the workflow fails closed if it cannot verify a nonempty
+reviewer rule on `demo`. These environment settings and the additional OIDC
+credential must be configured outside the workflow YAML.
+Review the `whatif` job logs before approving the pending deployment.
 Concurrency serializes workflow runs; do not run a local deployment concurrently.
 Deployment is incremental and multi-stage, not transactional: a later failure can
 leave earlier stages deployed. Review changes and rerun deliberately.
