@@ -2,22 +2,10 @@ name: Deploy ALZ Platform (Bicep)
 
 on:
   workflow_dispatch:
-    inputs:
-      operation:
-        description: "Preview changes or deploy the platform landing zones"
-        required: true
-        type: choice
-        options:
-          - what-if
-          - deploy
-        default: what-if
-      confirmation:
-        description: "For deploy, type DEPLOY to authorize Azure resources, policy and RBAC changes"
-        required: false
-        type: string
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 concurrency:
@@ -25,7 +13,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  whatif:
+    name: What-if
+    runs-on: windows-latest
+    environment: demo-whatif
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check deployment approval gate and settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Run this workflow from main only.'
+          }
+          foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing demo-whatif environment variable: $name."
+            }
+          }
+          $environmentJson = & gh api "repos/$env:GITHUB_REPOSITORY/environments/demo"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to verify the demo deployment approval gate.'
+          }
+          $deploymentEnvironment = $environmentJson | ConvertFrom-Json
+          $reviewerRules = @($deploymentEnvironment.protection_rules | Where-Object {
+            $_.type -eq 'required_reviewers' -and @($_.reviewers).Count -gt 0
+          })
+          if ($reviewerRules.Count -eq 0) {
+            throw 'Configure required reviewers on the demo environment before running this workflow.'
+          }
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and preview Bicep
+        run: |
+          .\alz\scripts\Invoke-AlzDeployment.ps1 `
+            -Operation WhatIf `
+            -OutputPath "$env:RUNNER_TEMP\alz-bicep"
+
   deploy:
+    name: Deploy (approval required)
+    needs: whatif
     runs-on: windows-latest
     environment: demo
     timeout-minutes: 180
@@ -36,22 +82,17 @@ jobs:
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      DEPLOYMENT_OPERATION: ${{ inputs.operation }}
-      DEPLOYMENT_CONFIRMATION: ${{ inputs.confirmation }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Check authorization and settings
+      - name: Check settings
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_REF -ne 'refs/heads/main') {
             throw 'Run this workflow from main only.'
-          }
-          if ($env:DEPLOYMENT_OPERATION -eq 'deploy' -and $env:DEPLOYMENT_CONFIRMATION -cne 'DEPLOY') {
-            throw 'Deploying requires explicit DEPLOY confirmation.'
           }
           foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
@@ -66,17 +107,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build and preview Bicep
-        if: inputs.operation == 'what-if'
-        run: |
-          .\alz\scripts\Invoke-AlzDeployment.ps1 `
-            -Operation WhatIf `
-            -OutputPath "$env:RUNNER_TEMP\alz-bicep"
-
-      - name: Build and deploy explicitly authorized Bicep
-        if: inputs.operation == 'deploy'
+      - name: Build and deploy approved Bicep
         run: |
           .\alz\scripts\Invoke-AlzDeployment.ps1 `
             -Operation Deploy `
-            -Confirmation $env:DEPLOYMENT_CONFIRMATION `
+            -Confirmation DEPLOY `
             -OutputPath "$env:RUNNER_TEMP\alz-bicep"
