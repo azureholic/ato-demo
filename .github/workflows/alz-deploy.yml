@@ -14,9 +14,9 @@ concurrency:
 
 jobs:
   whatif:
-    name: What-if
+    name: Lint and what-if
     runs-on: windows-latest
-    environment: demo
+    environment: demo-whatif
     timeout-minutes: 180
     defaults:
       run:
@@ -41,7 +41,7 @@ jobs:
           }
           foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-              throw "Missing demo environment variable: $name."
+              throw "Missing demo-whatif environment variable: $name."
             }
           }
           $environmentJson = & gh api "repos/$env:GITHUB_REPOSITORY/environments/demo"
@@ -55,6 +55,11 @@ jobs:
           if ($reviewerRules.Count -eq 0) {
             throw 'Configure required reviewers on the demo environment before running this workflow.'
           }
+
+      - name: Lint and build Bicep
+        run: |
+          .\alz\scripts\Initialize-Alz.ps1 `
+            -OutputPath "$env:RUNNER_TEMP\alz-bicep"
 
       - name: Azure login with OIDC
         uses: azure/login@v2
