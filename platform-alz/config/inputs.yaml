@@ -1,0 +1,22 @@
+---
+# Based on Azure/alz-bicep-accelerator v2.4.0 examples/bootstrap/inputs-local.yaml.
+iac_type: bicep
+bootstrap_module_name: alz_local
+starter_module_name: platform_landing_zone
+bootstrap_module_version: v7.3.2
+starter_module_version: v2.4.0
+terraform_version: 1.14.9
+bootstrap_location: swedencentral
+root_parent_management_group_id: 6e689817-26c3-498a-a758-a45e53e81733
+bootstrap_subscription_id: 6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c
+subscription_ids:
+  management: 6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c
+  connectivity: 6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c
+  identity: ""
+  security: ""
+service_name: alz
+environment_name: mgmt
+postfix_number: 1
+# Only generate files. Existing Azure bootstrap resources/state remain untouched.
+create_bootstrap_resources_in_azure: false
+move_subscriptions_to_target_management_group: false

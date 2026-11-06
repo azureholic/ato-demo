@@ -1,4 +1,5 @@
 alz/output/
+platform-alz/output/
 **/.terraform/
 **/*.tfstate
 **/*.tfstate.*

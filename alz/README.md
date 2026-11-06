@@ -1,5 +1,10 @@
 # ALZ Bicep SMB landing zone
 
+> Legacy reference: GitHub Actions now uses the official Bicep Accelerator
+> local flow in [platform-alz](../platform-alz/README.md), configured for Sweden
+> Central. The instructions below describe the previous Bicep implementation,
+> not the active workflow. Do not run both against the same platform.
+
 This Azure-only platform landing zone uses the official
 [Azure/alz-bicep-accelerator v2.4.0](https://github.com/Azure/alz-bicep-accelerator/tree/v2.4.0)
 templates and their version-pinned Azure Verified Modules. The upstream templates

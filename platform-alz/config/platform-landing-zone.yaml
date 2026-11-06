@@ -1,0 +1,6 @@
+# Adapted from Azure/alz-bicep-accelerator v2.4.0 examples/platform-landing-zone.yaml.
+starter_locations: ["swedencentral"]
+network_type: hubNetworking
+management_group_id_prefix: ""
+management_group_id_postfix: ""
+management_group_int_root_id: alz

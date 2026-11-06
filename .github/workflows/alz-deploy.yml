@@ -1,4 +1,4 @@
-name: Deploy ALZ Platform (Bicep)
+name: Deploy ALZ Platform (Bicep Accelerator)
 
 on:
   workflow_dispatch:
@@ -13,10 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  whatif:
-    name: Lint and what-if
+  deploy:
+    name: Generate and deploy SMB platform (approval required)
     runs-on: windows-latest
-    environment: demo-whatif
+    environment: demo
     timeout-minutes: 180
     defaults:
       run:
@@ -25,6 +25,9 @@ jobs:
       ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,69 +44,39 @@ jobs:
           }
           foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-              throw "Missing demo-whatif environment variable: $name."
+              throw "Missing demo environment variable: $name."
             }
           }
           $environmentJson = & gh api "repos/$env:GITHUB_REPOSITORY/environments/demo"
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Unable to verify the demo deployment approval gate.'
-          }
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to verify the demo deployment approval gate.' }
           $deploymentEnvironment = $environmentJson | ConvertFrom-Json
           $reviewerRules = @($deploymentEnvironment.protection_rules | Where-Object {
             $_.type -eq 'required_reviewers' -and @($_.reviewers).Count -gt 0
           })
           if ($reviewerRules.Count -eq 0) {
-            throw 'Configure required reviewers on the demo environment before running this workflow.'
+            throw 'Configure required reviewers on demo before running this workflow.'
           }
 
-      - name: Lint and build Bicep
-        run: |
-          .\alz\scripts\Initialize-Alz.ps1 `
-            -OutputPath "$env:RUNNER_TEMP\alz-bicep"
-
-      - name: Azure login with OIDC
-        uses: azure/login@v2
+      - name: Install Terraform (local file generation only)
+        uses: hashicorp/setup-terraform@v3
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          terraform_version: 1.14.9
+          terraform_wrapper: false
 
-      - name: Build and preview Bicep
-        run: |
-          .\alz\scripts\Invoke-AlzDeployment.ps1 `
-            -Operation WhatIf `
-            -OutputPath "$env:RUNNER_TEMP\alz-bicep"
-
-  deploy:
-    name: Deploy (approval required)
-    needs: whatif
-    runs-on: windows-latest
-    environment: demo
-    timeout-minutes: 180
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Check settings
+      - name: Install ALZ PowerShell dependencies
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_REF -ne 'refs/heads/main') {
-            throw 'Run this workflow from main only.'
-          }
-          foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
-            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-              throw "Missing demo environment variable: $name."
-            }
-          }
+          Install-Module powershell-yaml -RequiredVersion 0.4.12 -Scope CurrentUser -Force
+          Install-Module ALZ -RequiredVersion 7.1.5 -Scope CurrentUser -Force
+          Install-Module Az.Accounts -RequiredVersion 5.5.4 -Scope CurrentUser -Force
+          Install-Module Az.Resources -RequiredVersion 10.2.2 -Scope CurrentUser -Force
+
+      - name: Install Bicep CLI
+        run: |
+          $ErrorActionPreference = 'Stop'
+          az bicep install --version v0.44.1
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep CLI installation failed.' }
+          Join-Path $HOME '.azure\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Azure login with OIDC
         uses: azure/login@v2
@@ -111,10 +84,10 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          enable-AzPSSession: true
 
-      - name: Build and deploy approved Bicep
+      - name: Generate from repository configuration and run official local deployment
         run: |
-          .\alz\scripts\Invoke-AlzDeployment.ps1 `
-            -Operation Deploy `
-            -Confirmation DEPLOY `
-            -OutputPath "$env:RUNNER_TEMP\alz-bicep"
+          $ErrorActionPreference = 'Stop'
+          Import-Module ALZ -RequiredVersion 7.1.5
+          .\platform-alz\Invoke-PlatformAlz.ps1 -OutputPath "$env:RUNNER_TEMP\platform-alz"
