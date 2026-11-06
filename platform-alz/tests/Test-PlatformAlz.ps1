@@ -2,14 +2,15 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module powershell-yaml -RequiredVersion 0.4.12
+Import-Module ALZ -RequiredVersion 7.1.5
 $root = Split-Path $PSScriptRoot -Parent
 $config = Get-Content (Join-Path $root 'config\inputs.yaml') -Raw | ConvertFrom-Yaml
 $adapter = Join-Path $root 'Invoke-PlatformAlz.ps1'
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) "platform-alz-tests-$([guid]::NewGuid())"
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) "platform-alz tests-$([guid]::NewGuid())"
 $environmentNames = @(
     'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID',
     'TF_STATE_RESOURCE_GROUP', 'TF_STATE_STORAGE_ACCOUNT', 'TF_STATE_CONTAINER',
-    'ALZ_target_directory', 'TF_CLI_ARGS_init'
+    'ALZ_target_directory', 'TF_VAR_target_directory', 'TF_CLI_ARGS_init'
 )
 $previous = @{}
 foreach ($name in $environmentNames) {
@@ -50,10 +51,21 @@ function Deploy-Accelerator {
         throw 'Missing version-controlled SMB parameter overrides.'
     }
     $testState.GenerationCount++
-    $scriptsDirectory = Join-Path $env:ALZ_target_directory 'scripts'
+    $targetDirectory = & (Get-Module ALZ) {
+        param($defaultDirectory)
+        $parameters = [pscustomobject]@{
+            target_directory = [pscustomobject]@{
+                Source = 'input'
+                Value = ''
+                DefaultValue = $defaultDirectory
+            }
+        }
+        (Set-Config -configurationParameters $parameters -inputConfig ([pscustomobject]@{}) -copyEnvVarToConfig).target_directory.Value
+    } (Join-Path $output 'local-output')
+    $scriptsDirectory = Join-Path $targetDirectory 'scripts'
     New-Item $scriptsDirectory -ItemType Directory -Force | Out-Null
     if ($testState.Mode -eq 'missing-script') { return }
-    $hubDirectory = Join-Path $env:ALZ_target_directory 'templates\networking\hubnetworking'
+    $hubDirectory = Join-Path $targetDirectory 'templates\networking\hubnetworking'
     New-Item $hubDirectory -ItemType Directory -Force | Out-Null
     $hubTemplate = @'
 var resources = [
@@ -77,7 +89,7 @@ param()
 $answer = Read-Host -Prompt "Type 'yes' and hit Enter to continue with the full deployment"
 if ($answer -cne 'yes') { throw 'Standard Bicep confirmation was not supplied.' }
 if (-not [string]::IsNullOrEmpty($env:TF_CLI_ARGS_init)) { throw 'Bicep must not use a remote Terraform backend.' }
-if ((Get-Location).Path -ne $env:ALZ_target_directory) { throw 'Wrong deployment working directory.' }
+if ((Get-Location).Path -ne $env:TF_VAR_target_directory) { throw 'Wrong deployment working directory.' }
 if (Test-Path backend.hcl) { throw 'Bicep must not create a state backend configuration.' }
 $hubTemplate = Get-Content 'templates\networking\hubnetworking\main.bicep' -Raw
 if ([regex]::Matches($hubTemplate, [regex]::Escape('${substring(hub.location, 0, 3)}')).Count -ne 3 -or
@@ -108,6 +120,8 @@ try {
     $env:TF_STATE_CONTAINER = $null
     $env:TF_CLI_ARGS_init = 'original-init-arguments'
     $env:ALZ_target_directory = 'original-target'
+    $originalBootstrapTarget = Join-Path $testRoot 'original-bootstrap-target'
+    $env:TF_VAR_target_directory = $originalBootstrapTarget
     $originalLocation = (Get-Location).Path
 
     & $adapter -OutputPath (Join-Path $testRoot 'success')
@@ -137,10 +151,11 @@ try {
     }
     if ((Get-Location).Path -ne $originalLocation -or
         $env:TF_CLI_ARGS_init -ne 'original-init-arguments' -or
-        $env:ALZ_target_directory -ne 'original-target') {
+        $env:ALZ_target_directory -ne 'original-target' -or
+        $env:TF_VAR_target_directory -ne $originalBootstrapTarget) {
         throw 'The adapter did not restore the caller environment and working directory.'
     }
-    Write-Host 'PASS: Bicep handoff, short hub names with unchanged locations, fail-closed template matching, no state backend, preflight/build guards, failure propagation and cleanup.'
+    Write-Host 'PASS: real ALZ target-directory resolution, Bicep handoff, short hub names with unchanged locations, fail-closed template matching, no state backend, preflight/build guards, failure propagation and cleanup.'
 } finally {
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $previous[$name])

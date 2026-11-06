@@ -36,6 +36,10 @@ bootstrap. Existing private bootstrap storage and its state are left untouched.
   existing `alz` root, security contact, hub range and tags.
 - [Invoke-PlatformAlz.ps1](Invoke-PlatformAlz.ps1): validates matching configuration,
   generates the platform, builds parameters and invokes the official local script.
+  It passes the generated platform directory through `TF_VAR_target_directory`,
+  the bootstrap module's supported environment override, and restores the
+  caller's previous value afterward. `ALZ_target_directory` is not recognized
+  for this bootstrap variable.
 
 The Bicep release provides a general platform example, **not** the Terraform
 release's dedicated SMB tfvars example. These Bicep parameters retain the demo's

@@ -45,10 +45,10 @@ $outputDirectory = [IO.Path]::GetFullPath($OutputPath)
 if (Test-Path $outputDirectory) {
     throw 'Use a fresh output directory. Generated bootstrap files must not reuse the preserved bootstrap state.'
 }
-$previousTarget = $env:ALZ_target_directory
+$previousTarget = $env:TF_VAR_target_directory
 $previousInitArguments = $env:TF_CLI_ARGS_init
 try {
-    $env:ALZ_target_directory = Join-Path $outputDirectory 'platform'
+    $env:TF_VAR_target_directory = Join-Path $outputDirectory 'platform'
     $env:TF_CLI_ARGS_init = $null
     Deploy-Accelerator -inputConfigFilePaths @(
         $inputsPath
@@ -57,10 +57,10 @@ try {
         (Join-Path $PSScriptRoot 'config\templates')
     ) -output $outputDirectory -autoApprove
 
-    $platformDirectory = $env:ALZ_target_directory
+    $platformDirectory = $env:TF_VAR_target_directory
     $deployScript = Join-Path $platformDirectory 'scripts\deploy-local.ps1'
     if (-not (Test-Path $deployScript -PathType Leaf)) {
-        throw 'The Accelerator did not generate the expected official local deployment script.'
+        throw "The Accelerator did not generate the expected official local deployment script at '$deployScript'."
     }
 
     # These three upstream names have no parameter override in the pinned release.
@@ -96,7 +96,7 @@ try {
             $ErrorActionPreference = "Stop"
             $PSNativeCommandUseErrorActionPreference = $true
             $global:LASTEXITCODE = 0
-            & (Join-Path $env:ALZ_target_directory "scripts\deploy-local.ps1") -Verbose:$false
+            & (Join-Path $env:TF_VAR_target_directory "scripts\deploy-local.ps1") -Verbose:$false
             exit $LASTEXITCODE
         '
     } finally {
@@ -104,5 +104,5 @@ try {
     }
 } finally {
     $env:TF_CLI_ARGS_init = $previousInitArguments
-    $env:ALZ_target_directory = $previousTarget
+    $env:TF_VAR_target_directory = $previousTarget
 }
