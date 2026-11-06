@@ -7,6 +7,10 @@ endpoint, Blob state access or remote Terraform state is required.**
 1. Wait for approval on the existing `demo` GitHub environment.
 2. Install ALZ PowerShell, powershell-yaml, Az PowerShell and Bicep CLI.
    Terraform is installed only for the Accelerator's local file-generation step.
+   Each pinned PowerShell module install gets up to five attempts against
+   PSGallery, waiting 10, 20, 40 and 80 seconds between failures. Only the failed
+   module is retried; exhausted retries fail the workflow with the module name,
+   version and underlying error.
 3. Sign in with the existing Entra OIDC application, enabling both Azure CLI
    and Az PowerShell sessions.
 4. Run `Deploy-Accelerator` with `iac_type: bicep` and repository configuration.

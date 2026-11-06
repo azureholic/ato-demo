@@ -186,8 +186,58 @@ function Assert-Failure {
     throw "Expected failure containing: $Expected"
 }
 
+function Test-ModuleInstallRetries {
+    $workflow = Get-Content (Join-Path $root '..\.github\workflows\alz-deploy.yml') -Raw | ConvertFrom-Yaml
+    $installStep = @($workflow.jobs.deploy.steps | Where-Object name -eq 'Install ALZ PowerShell dependencies')
+    if ($installStep.Count -ne 1) { throw 'Expected exactly one module installation step.' }
+    $installScript = [scriptblock]::Create($installStep[0].run)
+    $installState = @{
+        Mode = 'success'
+        Calls = [Collections.Generic.List[string]]::new()
+        Delays = [Collections.Generic.List[int]]::new()
+    }
+    function Install-Module {
+        [CmdletBinding()]
+        param([string]$Name, [string]$RequiredVersion, [string]$Scope, [string]$Repository, [switch]$Force)
+        if ($Scope -ne 'CurrentUser' -or $Repository -ne 'PSGallery' -or -not $Force) {
+            throw 'Module installation settings changed unexpectedly.'
+        }
+        $installState.Calls.Add($Name)
+        if (($installState.Mode -eq 'transient' -and $Name -eq 'Az.Resources' -and
+                @($installState.Calls | Where-Object { $_ -eq $Name }).Count -lt 3) -or
+            ($installState.Mode -eq 'exhausted' -and $Name -eq 'ALZ')) {
+            Write-Error "Package '$Name' failed to download."
+        }
+    }
+    function Start-Sleep {
+        param([int]$Seconds)
+        $installState.Delays.Add($Seconds)
+    }
+    & $installScript
+    if (($installState.Calls -join ',') -ne 'powershell-yaml,ALZ,Az.Accounts,Az.Resources' -or
+        $installState.Delays.Count -ne 0) {
+        throw 'Successful installations must not be repeated or delayed.'
+    }
+    $installState.Mode = 'transient'
+    $installState.Calls.Clear()
+    & $installScript
+    if (($installState.Calls -join ',') -ne 'powershell-yaml,ALZ,Az.Accounts,Az.Resources,Az.Resources,Az.Resources' -or
+        ($installState.Delays -join ',') -ne '10,20') {
+        throw 'Transient download errors must retry only the failed module with backoff.'
+    }
+    $installState.Mode = 'exhausted'
+    $installState.Calls.Clear()
+    $installState.Delays.Clear()
+    Assert-Failure { & $installScript } "Failed to install ALZ 7.1.5 after 5 attempts: Package 'ALZ' failed to download."
+    if (($installState.Calls -join ',') -ne 'powershell-yaml,ALZ,ALZ,ALZ,ALZ,ALZ' -or
+        ($installState.Delays -join ',') -ne '10,20,40,80') {
+        throw 'Exhausted installation retries must stop at five attempts without installing subsequent modules.'
+    }
+}
+
 try {
     New-Item $testRoot -ItemType Directory | Out-Null
+    Test-ModuleInstallRetries
     $env:ARM_CLIENT_ID = [guid]::NewGuid().ToString()
     $env:ARM_TENANT_ID = $config.root_parent_management_group_id
     $env:ARM_SUBSCRIPTION_ID = $config.bootstrap_subscription_id
@@ -260,7 +310,7 @@ try {
         $env:TF_VAR_target_directory -ne $originalBootstrapTarget) {
         throw 'The adapter did not restore the caller environment and working directory.'
     }
-    Write-Host 'PASS: real ALZ target-directory resolution, Bicep handoff, short hub names with unchanged locations, fail-closed upstream matching, no state backend, preflight/build guards, OIDC renewal across expiry/retries/stages, fail-fast authentication errors, failure propagation and cleanup.'
+    Write-Host 'PASS: bounded module-install retries and backoff, real ALZ target-directory resolution, Bicep handoff, short hub names with unchanged locations, fail-closed upstream matching, no state backend, preflight/build guards, OIDC renewal across expiry/retries/stages, fail-fast authentication errors, failure propagation and cleanup.'
 } finally {
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $previous[$name])

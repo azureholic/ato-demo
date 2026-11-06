@@ -66,10 +66,27 @@ jobs:
       - name: Install ALZ PowerShell dependencies
         run: |
           $ErrorActionPreference = 'Stop'
-          Install-Module powershell-yaml -RequiredVersion 0.4.12 -Scope CurrentUser -Force
-          Install-Module ALZ -RequiredVersion 7.1.5 -Scope CurrentUser -Force
-          Install-Module Az.Accounts -RequiredVersion 5.5.4 -Scope CurrentUser -Force
-          Install-Module Az.Resources -RequiredVersion 10.2.2 -Scope CurrentUser -Force
+          function Install-ModuleWithRetry {
+            param([string]$Name, [string]$RequiredVersion)
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              Write-Host "Installing $Name $RequiredVersion (attempt $attempt/5)..."
+              try {
+                Install-Module -Name $Name -RequiredVersion $RequiredVersion -Scope CurrentUser -Repository PSGallery -Force -ErrorAction Stop
+                return
+              } catch {
+                if ($attempt -eq 5) {
+                  throw "Failed to install $Name $RequiredVersion after 5 attempts: $($_.Exception.Message)"
+                }
+                $delaySeconds = [int](10 * [Math]::Pow(2, $attempt - 1))
+                Write-Warning "Install failed for $Name ${RequiredVersion}: $($_.Exception.Message). Retrying in $delaySeconds seconds."
+                Start-Sleep -Seconds $delaySeconds
+              }
+            }
+          }
+          Install-ModuleWithRetry -Name powershell-yaml -RequiredVersion 0.4.12
+          Install-ModuleWithRetry -Name ALZ -RequiredVersion 7.1.5
+          Install-ModuleWithRetry -Name Az.Accounts -RequiredVersion 5.5.4
+          Install-ModuleWithRetry -Name Az.Resources -RequiredVersion 10.2.2
 
       - name: Install Bicep CLI
         run: |
