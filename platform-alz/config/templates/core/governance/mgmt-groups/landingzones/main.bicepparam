@@ -1,7 +1,5 @@
 using './main.bicep'
-import { settings, groupDefaults, monitoringOverrides } from '../../smb-settings.bicep'
-
-var workspaceId = '/subscriptions/${settings.subscriptionId}/resourceGroups/rg-management-${settings.location}/providers/Microsoft.OperationalInsights/workspaces/law-management-${settings.location}'
+import { settings, groupDefaults, monitoringOverrides, workspaceId } from '../../smb-settings.bicep'
 
 param parLocations = [settings.location]
 param landingZonesConfig = union(groupDefaults, {

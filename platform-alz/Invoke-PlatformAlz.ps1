@@ -63,6 +63,19 @@ try {
         throw 'The Accelerator did not generate the expected official local deployment script.'
     }
 
+    # These three upstream names have no parameter override in the pinned release.
+    $hubTemplatePath = Join-Path $platformDirectory 'templates\networking\hubnetworking\main.bicep'
+    $hubTemplate = Get-Content $hubTemplatePath -Raw
+    foreach ($prefix in 'rt-hub-fw', 'rt-hub-std', 'afwp-alz') {
+        $original = "name: '$prefix-" + '${hub.location}' + "'"
+        $replacement = "name: '$prefix-" + '${substring(hub.location, 0, 3)}' + "'"
+        if ([regex]::Matches($hubTemplate, [regex]::Escape($original)).Count -ne 1) {
+            throw "Expected exactly one upstream name expression for $prefix. Review the pinned hub template before deployment."
+        }
+        $hubTemplate = $hubTemplate.Replace($original, $replacement)
+    }
+    $hubTemplate | Set-Content -LiteralPath $hubTemplatePath -Encoding utf8
+
     $parameterRoot = Join-Path $PSScriptRoot 'config\templates'
     foreach ($file in Get-ChildItem $parameterRoot -Filter '*.bicepparam' -Recurse) {
         $relativePath = [IO.Path]::GetRelativePath($parameterRoot, $file.FullName)

@@ -53,6 +53,21 @@ function Deploy-Accelerator {
     $scriptsDirectory = Join-Path $env:ALZ_target_directory 'scripts'
     New-Item $scriptsDirectory -ItemType Directory -Force | Out-Null
     if ($testState.Mode -eq 'missing-script') { return }
+    $hubDirectory = Join-Path $env:ALZ_target_directory 'templates\networking\hubnetworking'
+    New-Item $hubDirectory -ItemType Directory -Force | Out-Null
+    $hubTemplate = @'
+var resources = [
+  { name: 'rt-hub-fw-${hub.location}', location: hub.location }
+  { name: 'rt-hub-std-${hub.location}', location: hub.location }
+  { name: 'afwp-alz-${hub.location}', location: hub.location }
+]
+'@
+    if ($testState.Mode -eq 'unexpected-hub-name') {
+        $hubTemplate = $hubTemplate.Replace('afwp-alz', 'afwp-changed-upstream')
+    } elseif ($testState.Mode -eq 'duplicate-hub-name') {
+        $hubTemplate += "`n" + 'var extra = { name: ''rt-hub-fw-${hub.location}'' }'
+    }
+    Set-Content (Join-Path $hubDirectory 'main.bicep') $hubTemplate
     $content = if ($testState.Mode -eq 'native-failure') {
         '[CmdletBinding()]param(); exit 23'
     } else {
@@ -64,6 +79,11 @@ if ($answer -cne 'yes') { throw 'Standard Bicep confirmation was not supplied.' 
 if (-not [string]::IsNullOrEmpty($env:TF_CLI_ARGS_init)) { throw 'Bicep must not use a remote Terraform backend.' }
 if ((Get-Location).Path -ne $env:ALZ_target_directory) { throw 'Wrong deployment working directory.' }
 if (Test-Path backend.hcl) { throw 'Bicep must not create a state backend configuration.' }
+$hubTemplate = Get-Content 'templates\networking\hubnetworking\main.bicep' -Raw
+if ([regex]::Matches($hubTemplate, [regex]::Escape('${substring(hub.location, 0, 3)}')).Count -ne 3 -or
+    -not $hubTemplate.Contains('location: hub.location') -or $hubTemplate.Contains('${hub.location}')) {
+    throw 'Hub names must be shortened without changing Azure deployment locations.'
+}
 Set-Content deployment-invoked.txt 'deployed'
 '@
     }
@@ -109,6 +129,8 @@ try {
         @{ Mode = 'missing-script'; Error = 'did not generate' }
         @{ Mode = 'native-failure'; Error = '23' }
         @{ Mode = 'invalid-build'; Error = 'Invalid or oversized Bicep' }
+        @{ Mode = 'unexpected-hub-name'; Error = 'Expected exactly one upstream name expression' }
+        @{ Mode = 'duplicate-hub-name'; Error = 'Expected exactly one upstream name expression' }
     )) {
         $testState.Mode = $case.Mode
         Assert-Failure { & $adapter -OutputPath (Join-Path $testRoot $case.Mode) } $case.Error
@@ -118,7 +140,7 @@ try {
         $env:ALZ_target_directory -ne 'original-target') {
         throw 'The adapter did not restore the caller environment and working directory.'
     }
-    Write-Host 'PASS: Bicep handoff with standard-input confirmation, no state backend, preflight/build guards, native failure propagation and cleanup.'
+    Write-Host 'PASS: Bicep handoff, short hub names with unchanged locations, fail-closed template matching, no state backend, preflight/build guards, failure propagation and cleanup.'
 } finally {
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $previous[$name])

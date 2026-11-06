@@ -2,9 +2,12 @@
 var settings = loadJsonContent('../../smb.json')
 var subscriptionId = settings.subscriptionId
 var location = settings.location
-var managementResourceGroupId = '/subscriptions/${subscriptionId}/resourceGroups/rg-management-${location}'
-var workspaceId = '${managementResourceGroupId}/providers/Microsoft.OperationalInsights/workspaces/law-management-${location}'
-var amaIdentityId = '${managementResourceGroupId}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-management-ama-${location}'
+@export()
+var locationShort = substring(location, 0, 3)
+var managementResourceGroupId = '/subscriptions/${subscriptionId}/resourceGroups/rg-management-${locationShort}'
+@export()
+var workspaceId = '${managementResourceGroupId}/providers/Microsoft.OperationalInsights/workspaces/law-management-${locationShort}'
+var amaIdentityId = '${managementResourceGroupId}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/uami-management-ama-${locationShort}'
 var changeTrackingDcrId = '${managementResourceGroupId}/providers/Microsoft.Insights/dataCollectionRules/dcr-change-tracking'
 var vmInsightsDcrId = '${managementResourceGroupId}/providers/Microsoft.Insights/dataCollectionRules/dcr-vm-insights'
 var defenderSqlDcrId = '${managementResourceGroupId}/providers/Microsoft.Insights/dataCollectionRules/dcr-defender-sql'
@@ -42,7 +45,7 @@ var rootOverrides = {
     parameters: union(toObject(defenderServices, service => service, service => { value: 'DeployIfNotExists' }), {
       logAnalytics: { value: workspaceId }
       emailSecurityContact: { value: settings.securityContactEmail }
-      ascExportResourceGroupName: { value: 'rg-asc-export-${location}' }
+      ascExportResourceGroupName: { value: 'rg-asc-export-${locationShort}' }
       ascExportResourceGroupLocation: { value: location }
     })
   }
@@ -54,7 +57,7 @@ var rootOverrides = {
   }
   'Deploy-SvcHealth-BuiltIn': {
     parameters: {
-      resourceGroupName: { value: 'rg-service-health-alerts-${location}' }
+      resourceGroupName: { value: 'rg-service-health-alerts-${locationShort}' }
       resourceGroupLocation: { value: location }
       actionGroupResources: {
         value: {
@@ -112,6 +115,6 @@ var monitoringOverrides = {
     }
   }
   'DenyAction-DeleteUAMIAMA': {
-    parameters: { resourceName: { value: 'uami-management-ama-${location}' } }
+    parameters: { resourceName: { value: 'uami-management-ama-${locationShort}' } }
   }
 }

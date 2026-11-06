@@ -16,7 +16,16 @@ subscription_ids:
   security: ""
 service_name: alz
 environment_name: mgmt
-postfix_number: 1
+# Explicit bootstrap names omit the Accelerator's numeric postfix token.
+# These do not create or rename resources while Azure bootstrap is disabled.
+resource_names:
+  resource_group_state: "rg-{{service_name}}-{{environment_name}}-state-{{azure_location_short}}"
+  resource_group_identity: "rg-{{service_name}}-{{environment_name}}-identity-{{azure_location_short}}"
+  user_assigned_managed_identity_plan: "id-{{service_name}}-{{environment_name}}-{{azure_location_short}}-plan"
+  user_assigned_managed_identity_apply: "id-{{service_name}}-{{environment_name}}-{{azure_location_short}}-apply"
+  user_assigned_managed_identity_federated_credentials_prefix: "{{service_name}}-{{environment_name}}-{{azure_location_short}}"
+  storage_account: "sto{{service_name_short}}{{environment_name_short}}{{azure_location_short}}{{random_string}}"
+  storage_container: "{{environment_name}}-tfstate"
 # Only generate files. Existing Azure bootstrap resources/state remain untouched.
 create_bootstrap_resources_in_azure: false
 move_subscriptions_to_target_management_group: false

@@ -50,6 +50,31 @@ and connectivity. Policies assigned only to those child groups do not cover the
 shared subscription. The existing `alz` root is referenced, not recreated or
 reparented. `root_parent_management_group_id` remains the tenant root ID.
 
+Resource groups and platform resources have **no numeric `-001` suffix**:
+for example, `rg-management-swe`, `rg-hub-swe` and
+`law-management-swe`. The `resource_names` overrides in
+[inputs.yaml](config/inputs.yaml) also omit the numeric postfix token from
+bootstrap names; the Accelerator's internal numeric default is not used by
+these explicit name templates. A random suffix is retained only for the dormant
+bootstrap storage-account name's global uniqueness. Azure bootstrap remains
+disabled, so these overrides do not create storage or rename existing bootstrap
+resources.
+
+All region-bearing names use the same short-location rule as the pinned
+[Accelerator naming module](https://github.com/Azure/accelerator-bootstrap-modules/blob/v7.3.2/modules/resource_names/locals.tf):
+`azure_location_short = substr(azure_location, 0, 3)`. Sweden Central therefore
+becomes `swe`. This is a simple string abbreviation, not an official or globally
+unique region code; for example, Sweden South would also become `swe`.
+Actual Azure location properties remain `swedencentral`.
+
+Most names use parameter overrides. The upstream hub template hardcodes two
+route-table names and the firewall-policy name without a naming parameter;
+the adapter changes only those three name expressions after generation and
+before compilation. Each must match exactly once or the run stops for review.
+The deployment script is not modified. Changing existing Azure resource names
+can create replacement resources; review stack ownership and `DeleteAll`
+behavior before deploying this naming change.
+
 Pinned versions: ALZ PowerShell 7.1.5, bootstrap modules v7.3.2, Bicep starter
 v2.4.0, Bicep CLI v0.44.1, powershell-yaml 0.4.12, Az.Accounts 5.5.4,
 Az.Resources 10.2.2, and generation-only Terraform 1.14.9. Change the Terraform
