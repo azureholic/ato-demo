@@ -140,12 +140,13 @@ Test the local bootstrap without Azure changes:
 [alz-deploy.yml](../.github/workflows/alz-deploy.yml) uses a public GitHub-hosted
 `windows-latest` runner and Entra OIDC. It runs only by manual dispatch on `main`.
 Each run has two jobs: `whatif` previews the changes, then `deploy` waits for
-approval on the `demo` environment. Deployment is skipped if what-if fails.
+approval on the `demo` environment. Both jobs use `demo`, so its required-reviewer
+gate also applies before what-if runs. Deployment is skipped if what-if fails.
 There is no operation selector or typed confirmation at dispatch; environment
 approval authorizes deployment. Pushing code does not start this workflow.
 
-Create an unprotected `demo-whatif` environment for preview and keep `demo` for
-deployment. Configure these variables on **both** environments:
+Use the `demo` environment for both preview and deployment. Configure these
+variables on `demo`:
 
 | Variable | Value |
 | --- | --- |
@@ -157,10 +158,8 @@ The existing federated credential uses issuer
 `https://token.actions.githubusercontent.com`, audience
 `api://AzureADTokenExchange`, and immutable subject
 `repo:azureholic@7915366/ato-demo@1445961666:environment:demo`.
-Add a second federated credential on the same Entra application, with the same
-issuer and audience and subject
-`repo:azureholic@7915366/ato-demo@1445961666:environment:demo-whatif`.
-Keep the existing `demo` credential unchanged. No client secret is needed.
+Both jobs use this existing `demo` credential unchanged. No additional federated
+credential or client secret is needed.
 The service principal's existing Contributor and
 RBAC Administrator assignments at the tenant root management group, plus
 Resource Policy Contributor on `alz`, are retained. These roles do not grant
@@ -176,11 +175,11 @@ Verify Belgium Central service/SKU availability and quota before authorizing dep
 Before dispatching, configure **required reviewers** on `demo` in repository
 Settings > Environments, restrict deployment branches to `main`, and disable
 administrator bypass. Enable prevention of self-review if approval must come
-from another person. Leave `demo-whatif` without required reviewers so preview
-can run before approval. Required reviewers must be supported by the repository's
+from another person. Approve the `whatif` job to allow preview to run, then review
+its output before approving `deploy`. Required reviewers must be supported by the repository's
 GitHub plan/visibility; the workflow fails closed if it cannot verify a nonempty
-reviewer rule on `demo`. These environment settings and the additional OIDC
-credential must be configured outside the workflow YAML.
+reviewer rule on `demo`. These environment settings must be configured outside
+the workflow YAML.
 Review the `whatif` job logs before approving the pending deployment.
 Concurrency serializes workflow runs; do not run a local deployment concurrently.
 Deployment is incremental and multi-stage, not transactional: a later failure can

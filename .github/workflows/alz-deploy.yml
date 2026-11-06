@@ -16,7 +16,7 @@ jobs:
   whatif:
     name: What-if
     runs-on: windows-latest
-    environment: demo-whatif
+    environment: demo
     timeout-minutes: 180
     defaults:
       run:
@@ -41,7 +41,7 @@ jobs:
           }
           foreach ($name in 'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID') {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-              throw "Missing demo-whatif environment variable: $name."
+              throw "Missing demo environment variable: $name."
             }
           }
           $environmentJson = & gh api "repos/$env:GITHUB_REPOSITORY/environments/demo"
