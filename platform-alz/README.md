@@ -103,6 +103,34 @@ version in both workflow and bootstrap inputs together.
 
 ## GitHub setup and deployment cautions
 
+### First-deployment prerequisites
+
+Establish the management-group hierarchy declared in the governance parameters
+before the first full policy deployment. ARM validates nested deployment
+permissions against their target scopes before creating resources. A missing
+target group can therefore produce `Microsoft.Resources/deployments/write`
+authorization errors even for an administrator. Create missing groups under
+their configured parents rather than granting broader roles to work around
+this error. The official governance stacks can subsequently manage those groups.
+Allow the new hierarchy and inherited RBAC permissions to propagate, then
+validate the governance templates before restarting the full deployment.
+
+Deploy the pinned `templates/core/logging/main.bicep` with this repository's
+logging parameters as the subscription stack **`core-logging`** before running
+policies that reference its workspace. Use the same `DeleteAll` and `None` stack
+settings as the official deployment, and review any existing stack first.
+The pinned deployment order puts logging after governance; a failed governance
+stage prevents the workspace from being created. Meanwhile, existing Defender
+export and subscription diagnostic policies can evaluate and fail because
+`law-management-swe` does not exist. After logging succeeds, retry failed policy
+remediations; deploying the workspace alone does not rerun failed remediations.
+
+These are initial provisioning prerequisites, not additional workflow permission
+grants. Subsequent runs reuse the same hierarchy and logging stack without
+changing the official script's deployment order or stack ownership.
+
+### GitHub environment
+
 Configure only these variables on the existing `demo` environment:
 
 | Variable | Meaning |
