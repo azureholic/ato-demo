@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [string]$OutputPath
+    [string]$OutputPath,
+    [switch]$RefreshGitHubOidc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +62,31 @@ try {
     $deployScript = Join-Path $platformDirectory 'scripts\deploy-local.ps1'
     if (-not (Test-Path $deployScript -PathType Leaf)) {
         throw "The Accelerator did not generate the expected official local deployment script at '$deployScript'."
+    }
+
+    if ($RefreshGitHubOidc) {
+        $stackScriptPath = Join-Path $platformDirectory 'scripts\bicep-deploy.ps1'
+        $stackScript = Get-Content -LiteralPath $stackScriptPath -Raw
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($stackScript, [ref]$null, [ref]$parseErrors)
+        $retryLoops = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.WhileStatementAst] -and
+                $node.Condition.Extent.Text -eq '$retryCount -lt $retryMax'
+        }, $true))
+        $retryHooks = @($retryLoops | ForEach-Object { $_.Body.Statements } | Where-Object {
+            $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Left.Extent.Text -eq '$result' -and $_.Right.Extent.Text -eq '$null'
+        })
+        if ($parseErrors -or $retryLoops.Count -ne 1 -or $retryHooks.Count -ne 1) {
+            throw 'Expected the pinned deployment retry loop and authentication hook exactly once. Review the upstream script before deployment.'
+        }
+        # Renew outside the retry catch so authentication failures cannot be swallowed.
+        $stackScript = $stackScript.Insert($retryHooks[0].Extent.StartOffset,
+            "& (Join-Path `$PSScriptRoot 'Connect-GitHubOidc.ps1')`n`n    ")
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Connect-GitHubOidc.ps1') `
+            -Destination (Join-Path $platformDirectory 'scripts\Connect-GitHubOidc.ps1')
+        $stackScript | Set-Content -LiteralPath $stackScriptPath -Encoding utf8
     }
 
     # These three upstream names have no parameter override in the pinned release.

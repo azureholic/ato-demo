@@ -90,4 +90,4 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module ALZ -RequiredVersion 7.1.5
-          .\platform-alz\Invoke-PlatformAlz.ps1 -OutputPath "$env:RUNNER_TEMP\platform-alz"
+          .\platform-alz\Invoke-PlatformAlz.ps1 -OutputPath "$env:RUNNER_TEMP\platform-alz" -RefreshGitHubOidc

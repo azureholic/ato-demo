@@ -10,7 +10,8 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) "platform-alz tests-$([guid]::N
 $environmentNames = @(
     'ARM_CLIENT_ID', 'ARM_TENANT_ID', 'ARM_SUBSCRIPTION_ID',
     'TF_STATE_RESOURCE_GROUP', 'TF_STATE_STORAGE_ACCOUNT', 'TF_STATE_CONTAINER',
-    'ALZ_target_directory', 'TF_VAR_target_directory', 'TF_CLI_ARGS_init'
+    'ALZ_target_directory', 'TF_VAR_target_directory', 'TF_CLI_ARGS_init',
+    'ACTIONS_ID_TOKEN_REQUEST_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'PLATFORM_ALZ_TEST_MODE'
 )
 $previous = @{}
 foreach ($name in $environmentNames) {
@@ -100,6 +101,81 @@ Set-Content deployment-invoked.txt 'deployed'
 '@
     }
     Set-Content (Join-Path $scriptsDirectory 'deploy-local.ps1') $content
+    if ($testState.Mode -like 'oidc-*') {
+        $stackScript = @'
+param([string]$name)
+$retryCount = 0
+$retryMax = 2
+$finalSuccess = $false
+while ($retryCount -lt $retryMax) {
+    $result = $null
+    try {
+        Add-Content deployment-attempts.txt $name
+        if ($global:oidcTestState.SessionToken -ne "test-assertion-$($global:oidcTestState.RequestCount)") {
+            throw 'The expired assertion was reused.'
+        }
+        $global:oidcTestState.DeploymentCount++
+        if ($global:oidcTestState.DeploymentCount -eq 1) {
+            $global:oidcTestState.SessionToken = 'expired'
+            throw 'Simulated ClientAssertionCredential expiration during a long operation.'
+        }
+        $result = 'succeeded'
+    } catch {
+        $retryCount++
+        continue
+    }
+    if ($result -eq 'succeeded') {
+        $finalSuccess = $true
+        break
+    }
+}
+if (-not $finalSuccess) { throw 'Deployment could not recover from expired authentication.' }
+'@
+        if ($testState.Mode -eq 'oidc-changed-upstream') {
+            $stackScript = $stackScript.Replace('$result = $null', '$result = @{}')
+        }
+        Set-Content (Join-Path $scriptsDirectory 'bicep-deploy.ps1') $stackScript
+        Set-Content (Join-Path $scriptsDirectory 'deploy-local.ps1') @'
+[CmdletBinding()]
+param()
+$answer = Read-Host -Prompt 'Confirm deployment'
+if ($answer -cne 'yes') { throw 'Confirmation was not supplied.' }
+$global:oidcTestState = @{ RequestCount = 0; SessionToken = ''; DeploymentCount = 0 }
+function Invoke-RestMethod {
+    param($Uri, $Headers, $TimeoutSec, $MaximumRetryCount, $RetryIntervalSec)
+    if ($Uri -notlike '*&audience=api%3A%2F%2FAzureADTokenExchange' -or
+        $Headers.Authorization -ne 'Bearer test-request-token') {
+        throw 'Incorrect GitHub OIDC request.'
+    }
+    $global:oidcTestState.RequestCount++
+    Add-Content oidc-requests.txt 'request'
+    if ($env:PLATFORM_ALZ_TEST_MODE -eq 'oidc-request-failure') { throw 'OIDC request denied.' }
+    if ($env:PLATFORM_ALZ_TEST_MODE -eq 'oidc-empty-token') { return @{} }
+    [pscustomobject]@{ value = "test-assertion-$($global:oidcTestState.RequestCount)" }
+}
+function Import-Module {
+    param($Name, $RequiredVersion)
+    if ($Name -ne 'Az.Accounts' -or $RequiredVersion -ne '5.5.4') {
+        throw 'Unexpected module import.'
+    }
+}
+function Connect-AzAccount {
+    param([switch]$ServicePrincipal, $ApplicationId, $Tenant, $Subscription,
+        $FederatedToken, $Scope, [switch]$Force, [switch]$SkipContextPopulation)
+    if (-not $ServicePrincipal -or -not $Force -or -not $SkipContextPopulation -or
+        $Scope -ne 'Process' -or $ApplicationId -ne $env:ARM_CLIENT_ID -or
+        $Tenant -ne $env:ARM_TENANT_ID -or $Subscription -ne $env:ARM_SUBSCRIPTION_ID) {
+        throw 'Incorrect process-scoped Azure login.'
+    }
+    if ($env:PLATFORM_ALZ_TEST_MODE -eq 'oidc-login-failure') { throw 'Federated login rejected.' }
+    $global:oidcTestState.SessionToken = $FederatedToken
+    Add-Content oidc-logins.txt $FederatedToken
+}
+& (Join-Path $PSScriptRoot 'bicep-deploy.ps1') -name first-stage
+& (Join-Path $PSScriptRoot 'bicep-deploy.ps1') -name second-stage
+Set-Content deployment-invoked.txt 'deployed'
+'@
+    }
 }
 function Assert-Failure {
     param([scriptblock]$Action, [string]$Expected)
@@ -139,6 +215,35 @@ try {
         Assert-Failure { & $adapter -OutputPath (Join-Path $testRoot $case.Mode) } $case.Error
     }
     if ($testState.GenerationCount -ne 1) { throw 'Generation ran despite a failed preflight.' }
+    $env:ACTIONS_ID_TOKEN_REQUEST_URL = 'https://example.test/oidc?job=test'
+    $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN = 'test-request-token'
+    $testState.Mode = 'oidc-success'
+    $env:PLATFORM_ALZ_TEST_MODE = $testState.Mode
+    $oidcOutput = Join-Path $testRoot 'oidc-success'
+    & $adapter -OutputPath $oidcOutput -RefreshGitHubOidc
+    $logins = @(Get-Content (Join-Path $oidcOutput 'platform\oidc-logins.txt'))
+    $attempts = @(Get-Content (Join-Path $oidcOutput 'platform\deployment-attempts.txt'))
+    if (($logins -join ',') -ne 'test-assertion-1,test-assertion-2,test-assertion-3' -or
+        ($attempts -join ',') -ne 'first-stage,first-stage,second-stage' -or
+        -not (Test-Path (Join-Path $oidcOutput 'platform\deployment-invoked.txt'))) {
+        throw 'OIDC must be renewed before the first attempt, after expiry, and before the next stage.'
+    }
+    foreach ($mode in 'oidc-request-failure', 'oidc-empty-token', 'oidc-login-failure') {
+        $testState.Mode = $mode
+        $env:PLATFORM_ALZ_TEST_MODE = $mode
+        $failureOutput = Join-Path $testRoot $mode
+        Assert-Failure { & $adapter -OutputPath $failureOutput -RefreshGitHubOidc } '1'
+        if (Test-Path (Join-Path $failureOutput 'platform\deployment-attempts.txt')) {
+            throw 'Authentication failure must stop before deployment, outside the upstream retry catch.'
+        }
+        if (@(Get-Content (Join-Path $failureOutput 'platform\oidc-requests.txt')).Count -ne 1) {
+            throw 'The deployment loop must not retry a failed authentication renewal.'
+        }
+    }
+    $testState.Mode = 'oidc-changed-upstream'
+    Assert-Failure {
+        & $adapter -OutputPath (Join-Path $testRoot 'oidc-changed-upstream') -RefreshGitHubOidc
+    } 'Expected the pinned deployment retry loop'
     foreach ($case in @(
         @{ Mode = 'missing-script'; Error = 'did not generate' }
         @{ Mode = 'native-failure'; Error = '23' }
@@ -155,7 +260,7 @@ try {
         $env:TF_VAR_target_directory -ne $originalBootstrapTarget) {
         throw 'The adapter did not restore the caller environment and working directory.'
     }
-    Write-Host 'PASS: real ALZ target-directory resolution, Bicep handoff, short hub names with unchanged locations, fail-closed template matching, no state backend, preflight/build guards, failure propagation and cleanup.'
+    Write-Host 'PASS: real ALZ target-directory resolution, Bicep handoff, short hub names with unchanged locations, fail-closed upstream matching, no state backend, preflight/build guards, OIDC renewal across expiry/retries/stages, fail-fast authentication errors, failure propagation and cleanup.'
 } finally {
     foreach ($name in $environmentNames) {
         [Environment]::SetEnvironmentVariable($name, $previous[$name])

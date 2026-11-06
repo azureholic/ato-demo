@@ -12,9 +12,12 @@ endpoint, Blob state access or remote Terraform state is required.**
 4. Run `Deploy-Accelerator` with `iac_type: bicep` and repository configuration.
 5. Compile the SMB parameters before any platform deployment, checking ARM's
    4 MB template/parameter limit.
-6. Run the generated, **unmodified** `scripts/deploy-local.ps1`. The adapter
+6. Run the generated `scripts/deploy-local.ps1` entry point unchanged. The adapter
    supplies `yes` to its standard-input confirmation after GitHub approval.
    The Bicep script has no Terraform-style `auto_approve` parameter.
+   In GitHub Actions, `-RefreshGitHubOidc` adds an authentication call to the
+   generated `scripts/bicep-deploy.ps1` retry loop. Every stage attempt, including
+   retries, obtains a new GitHub assertion and signs in to Az PowerShell again.
 
 The official script deploys **Azure deployment stacks**. Azure stores their
 management metadata; no external state backend is involved. With
@@ -40,6 +43,10 @@ bootstrap. Existing private bootstrap storage and its state are left untouched.
   the bootstrap module's supported environment override, and restores the
   caller's previous value afterward. `ALZ_target_directory` is not recognized
   for this bootstrap variable.
+- [Connect-GitHubOidc.ps1](Connect-GitHubOidc.ps1): requests a fresh GitHub OIDC
+  assertion for `api://AzureADTokenExchange` and renews the process-scoped
+  Az PowerShell login. Tokens are masked in Actions logs; no client secret or
+  longer token lifetime is required.
 
 The Bicep release provides a general platform example, **not** the Terraform
 release's dedicated SMB tfvars example. These Bicep parameters retain the demo's
@@ -75,7 +82,13 @@ Most names use parameter overrides. The upstream hub template hardcodes two
 route-table names and the firewall-policy name without a naming parameter;
 the adapter changes only those three name expressions after generation and
 before compilation. Each must match exactly once or the run stops for review.
-The deployment script is not modified. Changing existing Azure resource names
+The deployment entry point is not modified. With `-RefreshGitHubOidc`, the
+adapter locates exactly one retry loop and its top-level result initialization
+in the pinned stack helper using the PowerShell parser, then inserts authentication
+before that initialization and outside the helper's retry catch. An unexpected
+upstream structure stops the run before deployment. Stack names, scope, retry
+limits, deployment-history cleanup, `DeleteAll` and deny settings remain unchanged.
+Changing existing Azure resource names
 can create replacement resources; review stack ownership and `DeleteAll`
 behavior before deploying this naming change.
 
@@ -99,6 +112,16 @@ OIDC federated credential. Configure required reviewers, restrict deployments to
 `main`, and disable administrator bypass. The workflow rejects non-main runs and
 verifies a nonempty reviewer rule. One approval authorizes generation and the
 subsequent deployment; there is no separate what-if approval gate.
+
+Service-principal OIDC logins use a short-lived GitHub assertion. The initial
+`azure/login` session alone cannot reliably authenticate an entire multi-hour
+deployment. The workflow enables per-attempt renewal in the deployment process,
+not a separate timer or background login process. If a long-running Az command
+outlives its assertion/access token and fails authentication, the next existing
+deployment retry signs in with a fresh assertion rather than reusing the expired
+credential. Authentication-renewal failures stop immediately instead of consuming
+the deployment retry budget. GitHub token requests have bounded HTTP retries.
+This does not resolve genuine Azure deployment or subscription-move errors.
 
 The deployment identity needs ALZ management-group, policy, custom-role,
 role-assignment, subscription and **deployment-stack** permissions. The old
@@ -139,6 +162,9 @@ Set `ARM_CLIENT_ID`, `ARM_TENANT_ID` and `ARM_SUBSCRIPTION_ID` to the matching
 deployment identity/environment. The command **deploys without another prompt**;
 use a fresh output directory. GitHub configures OIDC automatically; local
 interactive logins can be used without `ARM_USE_OIDC`.
+Local runs omit `-RefreshGitHubOidc` and leave the generated stack helper
+unchanged. That switch requires GitHub's `ACTIONS_ID_TOKEN_REQUEST_URL` and
+`ACTIONS_ID_TOKEN_REQUEST_TOKEN`, provided to the workflow with `id-token: write`.
 
 Run the orchestration tests without Azure access or resource changes:
 
