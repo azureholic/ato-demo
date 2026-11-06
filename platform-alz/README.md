@@ -134,6 +134,16 @@ deletion are allowed. Review conditional RBAC permissions and pre-existing roles
 this workflow does not grant itself permissions. No storage data-plane role is
 needed. Verify Sweden Central SKU availability and quotas before approval.
 
+Subscription placement specifically requires
+`Microsoft.Authorization/roleAssignments/write` and
+`Microsoft.Authorization/roleAssignments/delete` on the subscription or an
+ancestor. Conditional role-assignment grants can fail this authorization check.
+For this demo, the deployment identity has unconditional **Role Based Access
+Control Administrator** on the shared subscription, alongside its existing
+management-group permissions. This allows managing all role assignments,
+including Owner, within that subscription only; tenant-wide conditional grants
+remain unchanged. Provision this grant administratively, outside the workflow.
+
 **Important upstream behavior:** the pinned official deployment script uses
 `ActionOnUnmanage = DeleteAll` and `DenySettingsMode = None`. Removing resources
 from an existing stack's template can delete them. It also deletes deployment
