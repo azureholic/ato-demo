@@ -4,13 +4,23 @@ var config = loadJsonContent('./deployment.json')
 
 param environmentName = config.environmentName
 param location = config.location
-param apicLocation = config.location
+param apicLocation = ''
 param resourceGroupName = config.resourceGroupName
 param tags = union(config.tags, { 'azd-env-name': config.environmentName })
 
 param apimSku = config.apimSku
 param apimSkuUnits = config.apimSkuUnits
-param useExistingVnet = false
+param useExistingVnet = true
+param existingVnetRG = config.networking.resourceGroupName
+param vnetName = config.networking.vnetName
+param apimSubnetName = config.networking.apimSubnetName
+param privateEndpointSubnetName = config.networking.privateEndpointSubnetName
+param functionAppSubnetName = config.networking.functionAppSubnetName
+param dnsZoneRG = config.networking.dns.resourceGroupName
+param dnsSubscriptionId = config.networking.dns.subscriptionId
+
+var dnsZonePrefix = '/subscriptions/${config.networking.dns.subscriptionId}/resourceGroups/${config.networking.dns.resourceGroupName}/providers/Microsoft.Network/privateDnsZones'
+param existingPrivateDnsZones = toObject(items(config.networking.dns.zones), zone => zone.key, zone => '${dnsZonePrefix}/${zone.value}')
 param vnetAddressPrefix = config.vnetAddressPrefix
 param apimSubnetPrefix = config.apimSubnetPrefix
 param privateEndpointSubnetPrefix = config.privateEndpointSubnetPrefix

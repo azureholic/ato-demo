@@ -2,14 +2,6 @@ name: Deploy AI Governance Hub
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Validate only, or provision infrastructure and deploy the usage Logic App
-        type: choice
-        options:
-          - Validate
-          - Deploy
-        default: Validate
 
 permissions:
   contents: read
@@ -22,7 +14,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Validate or deploy governance hub (approval required)
+    name: Deploy governance hub (approval required)
     runs-on: windows-latest
     environment: demo
     timeout-minutes: 180
@@ -36,6 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Check deployment approval gate and identity settings
+        id: settings
         env:
           GH_TOKEN: ${{ github.token }}
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
@@ -61,6 +54,12 @@ jobs:
           if ($reviewerRules.Count -eq 0) {
             throw 'Configure required reviewers on demo before running this workflow.'
           }
+          $config = Get-Content '.\ai-governance-hub\config\deployment.json' -Raw | ConvertFrom-Json
+          $subscription = [guid]::Empty
+          if (-not [guid]::TryParse($config.subscriptionId, [ref]$subscription) -or $subscription -eq [guid]::Empty) {
+            throw 'Configure a valid subscriptionId in deployment.json.'
+          }
+          "subscription-id=$subscription" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Test deployment adapter
         run: .\ai-governance-hub\tests\Test-AiGovernanceHub.ps1
@@ -75,8 +74,20 @@ jobs:
           az bicep install --version v0.48.1
           if ($LASTEXITCODE -ne 0) { throw 'Bicep CLI installation failed.' }
 
+      - name: Authenticate Azure CLI for provider registration and networking
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.settings.outputs.subscription-id }}
+
+      - name: Register required resource providers and wait for readiness
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ steps.settings.outputs.subscription-id }}
+        run: |
+          .\ai-governance-hub\Register-ResourceProviders.ps1 -SubscriptionId $env:AZURE_SUBSCRIPTION_ID
+
       - name: Authenticate azd with existing GitHub OIDC identity
-        if: inputs.mode == 'Deploy'
         env:
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
@@ -86,10 +97,8 @@ jobs:
           azd auth login --client-id $env:AZURE_CLIENT_ID --tenant-id $env:AZURE_TENANT_ID --federated-credential-provider github --no-prompt
           if ($LASTEXITCODE -ne 0) { throw 'azd GitHub OIDC authentication failed.' }
 
-      - name: Clone pinned upstream, apply configuration and run selected mode
-        env:
-          DEPLOYMENT_MODE: ${{ inputs.mode }}
+      - name: Clone pinned upstream, apply configuration and deploy GovHub
         run: |
           .\ai-governance-hub\Invoke-AiGovernanceHub.ps1 `
             -OutputPath "$env:RUNNER_TEMP\ai-governance-hub" `
-            -Mode $env:DEPLOYMENT_MODE
+            -Mode Deploy

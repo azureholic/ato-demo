@@ -7,33 +7,43 @@ without vendoring its infrastructure, policies or application code.
 The [manual workflow](../.github/workflows/ai-governance-hub-deploy.yml) uses the
 existing `demo` approval environment and OIDC application, just like the ALZ
 workflow. It clones a **pinned upstream commit into runner temporary storage**,
-copies our two configuration files into `bicep/infra`, compiles the templates,
-checks the compact ARM request against the 4 MB limit, and optionally runs the
-upstream `azd provision` followed by `azd deploy`. The latter deploys the usage
-ingestion Logic App; infrastructure-only deployment would leave it unpublished.
-Upstream templates, policies, application code and `azure.yaml` remain unchanged.
+copies our configuration into the checkout, compiles the networking and GovHub
+templates, checks the compact ARM request against the 4 MB limit, then
+registers providers, prepares networking/DNS and runs upstream `azd provision`
+followed by `azd deploy`. The latter publishes the usage ingestion Logic App;
+infrastructure-only deployment would leave it unpublished.
 No Terraform or external deployment state storage is needed.
 
 ## Configuration
 
 - [deployment.json](config/deployment.json): subscription, primary region,
   environment/resource-group name, upstream revision, APIM sizing, network
-  ranges, regional Foundry instances and shared model deployment settings.
+  ranges, regional Foundry instances, shared model deployment settings, platform
+  hub and central DNS resource-group/zone references.
 - [main.bicepparam](config/main.bicepparam): small scenario overlay for the
   upstream entry point. Its `using './main.bicep'` reference resolves **after
   copying it into the upstream checkout**, not inside this repository.
 - [Invoke-AiGovernanceHub.ps1](Invoke-AiGovernanceHub.ps1): clone, overlay,
-  compile and optionally invoke upstream deployment commands.
+  compile, prepare networking/DNS and optionally invoke upstream deployment commands.
+- [Register-ResourceProviders.ps1](Register-ResourceProviders.ps1): idempotently
+  request missing provider registrations and wait up to 15 minutes for readiness.
+- [spoke.bicep](networking/spoke.bicep) and [peering.bicep](networking/peering.bicep):
+  small integration templates reusing the pinned upstream VNet module.
+- [private-dns.bicep](../platform-alz/config/private-dns.bicep): reusable platform
+  template for central zones and resolver-free links to connected VNets.
 
 Initial scenario:
 
 | Setting | Value |
 | --- | --- |
-| Primary region | Sweden Central |
+| Primary region | Italy North |
 | APIM | StandardV2, one unit |
-| Network | New `10.170.0.0/24` VNet; no ALZ hub changes or peering |
+| Network | `10.170.0.0/24` Italy spoke, peered both ways with platform `vnet-hub-swe` |
+| Network resource group | `rg-ai-governance-network-ita` |
+| GovHub resource group | `rg-ai-governance-ita` |
+| Private DNS | Central `rg-DNS` in the platform subscription; no Private Resolver |
 | Monitoring | Dedicated Log Analytics workspace |
-| Foundry backends | Sweden Central and Poland Central |
+| Foundry backends | Poland Central (primary) and Sweden Central |
 | Shared model | `gpt-6-astra`, version `2026-09-03` |
 | Model SKU/capacity | GlobalStandard, 10 units **per region** |
 | Optional extras | Redis, AI Search, Document Intelligence, API Center, realtime and dashboards disabled |
@@ -58,6 +68,57 @@ to authorize consumers before testing calls. Do not assume that deploying two
 regional backends provides seamless failover for stateful Responses/Assistants
 sessions. GlobalStandard does not guarantee EU-only inference processing.
 
+## Provider readiness and network preparation
+
+The failed deployment reported:
+
+- `MissingSubscriptionRegistration` for `Microsoft.AlertsManagement`.
+- `SubnetSubscriptionMustBeRegisteredWithMicrosoftWeb` for StandardV2 subnet
+  integration. `Microsoft.Web` was registered by the time of investigation,
+  but registration was not ready when APIM tried to integrate.
+- App Service/Logic App hosting capacity exhaustion in Sweden. Provider
+  registration does not resolve regional capacity exhaustion.
+
+The workflow explicitly checks the two observed providers before a full
+deployment. Already-registered providers are skipped; providers already
+registering are waited on without duplicate requests. Unregistering providers,
+CLI failures and timeouts stop the run. Other template providers remain
+subject to ARM's normal registration requirements.
+
+Network preparation creates the Italy spoke in its own resource group using
+the unchanged upstream VNet module, preserving APIM/Logic App delegations,
+NSGs and service endpoints. Its DNS-zone list is empty, so it creates no local
+zones or links. Both peerings enable VNet access and forwarded traffic, but no
+gateway transit or remote gateway. Peering does not force egress through the
+Sweden firewall; firewall routing is not changed here.
+
+After spoke deployment, the adapter discovers **all VNets in the configured
+GovHub, platform-hub and DNS subscriptions**, deduplicates them, and deploys the
+11 configured required private DNS zones in platform `rg-DNS`. Every zone is
+linked to every discovered VNet with autoregistration disabled. No resolver is
+deployed, and VNets must use Azure-provided DNS; discovering custom DNS stops
+the run instead of claiming that links alone resolve private endpoints.
+Additional VNets receive links on the next deployment or local Network run,
+not continuously.
+
+GovHub uses the supported `useExistingVnet` mode and explicit central zone
+resource IDs. Private endpoints remain workload resources; their zone groups
+manage records in the shared zones. The platform zone template is incremental
+and does not delete existing records or unrelated links. Do not also enable ALZ's
+zone creation for the same zone names in a different resource group.
+
+The pinned upstream main/resource templates do not list Italy North in their
+location allow-lists. The adapter adds only `italynorth` to those two
+annotations **on the runner**, requiring the exact pinned source structure.
+Unexpected source changes fail before deployment. API Center remains disabled
+with its location override blank. Policies, application code, deployment entry
+points, subnet module and `azure.yaml` remain unchanged.
+The official [APIM v2 region table](https://learn.microsoft.com/azure/api-management/api-management-region-availability)
+lists Italy North for StandardV2, but does not list Poland Central. This is why
+the core moved to Italy rather than Poland; the model backends remain in Poland
+and Sweden. Availability listings are not a reservation or guarantee of live
+regional capacity.
+
 ## Run from GitHub
 
 1. Review the configuration, costs, provider registration and quotas. Changing
@@ -73,14 +134,25 @@ sessions. GlobalStandard does not guarantee EU-only inference processing.
    role-assignment permissions (upstream recommends Owner, or Contributor
    plus User Access Administrator). ALZ management-group permissions alone
    are insufficient. Provision these permissions administratively, outside
-   this workflow, on the subscription selected in configuration.
-4. Open **Actions > Deploy AI Governance Hub > Run workflow** on `main`.
-   Run **Validate** first. This only clones and compiles; it does not call
-   Azure validation/what-if APIs or verify live permissions, quotas or DNS.
-5. Run again with **Deploy** and approve the `demo` environment gate.
+   this workflow, on the subscription selected in configuration. Provider
+   registration requires `/register/action` (included in Contributor/Owner).
+   The same OIDC identity also needs deployment, DNS-zone/link and peering
+   permissions in the **platform** subscription: central `rg-DNS`, the hub RG,
+   and permission to join each discovered VNet. It must be able to create
+   `rg-DNS` if absent. This workflow does not grant itself access.
+4. Delete the failed Sweden GovHub resource group yourself when ready, before
+   networking discovery, so it is not included in central DNS links. This code
+   contains **no resource deletion**, resource moves or soft-delete purges.
+5. Open **Actions > Deploy AI Governance Hub > Run workflow** on `main` and
+   approve the `demo` environment gate. There is no mode selector: every run
+   registers required providers, compiles the templates, prepares spoke/peerings
+   and central DNS, then provisions/publishes the complete GovHub.
+   Compilation and safety checks remain mandatory; there is no separate
+   validation-only workflow run.
 
 Deployment uses native `azd` GitHub federated authentication rather than a
-client secret or delegation to an old Azure CLI login. Versions are pinned:
+client secret or delegation to an old Azure CLI login. Azure CLI also signs in
+with OIDC for provider registration and cross-subscription networking. Versions are pinned:
 upstream commit in configuration, azd 1.37.3 and Bicep CLI 0.48.1 in the workflow.
 azd manages its own Bicep tool for provisioning. Review upstream release changes
 and run validation before updating the commit; do not replace it with `main`.
@@ -105,8 +177,11 @@ and run validation before updating the commit; do not replace it with `main`.
 - Configurable inference diagnostics disable LLM message logging and
   Application Insights body capture. Other upstream APIs/policies may have
   their own diagnostics; review those before sending sensitive prompts.
-- No ALZ VNet, workspace, management group or policy is reused or modified.
-  Resources remain subject to inherited ALZ policies, which may block deployment.
+- The existing ALZ hub is peered, but its subnets/firewall, workspace, management
+  groups and policies are not changed. Central DNS has its own platform template,
+  separate from the ALZ deployment stacks. Resources remain subject to inherited
+  ALZ policies, which may block deployment. Do not run the two workflows
+  concurrently while changing hub networking.
 - Deployment is multi-stage, not transactional. Resolve partial failures before
   retrying. Do not run concurrent deployments locally and in GitHub. The main
   upstream template is for initial implementation, not a general day-2 upgrade.
@@ -124,8 +199,15 @@ No Azure login is required for **Validate**:
 
 Always use a fresh output directory. The compiled template and parameters remain
 there for inspection; generated sources/configuration are never committed here.
-For local **Deploy**, authenticate with `azd auth login` first and explicitly
-pass `-Mode Deploy`; there is no local approval prompt.
+For local writes, authenticate Azure CLI and ensure access to both subscriptions.
+Register providers first; then explicitly choose `-Mode Network` or `-Mode Deploy`.
+Full Deploy also requires `azd auth login`. There is no local approval prompt:
+
+```powershell
+$config = Get-Content .\ai-governance-hub\config\deployment.json -Raw | ConvertFrom-Json
+.\ai-governance-hub\Register-ResourceProviders.ps1 -SubscriptionId $config.subscriptionId
+.\ai-governance-hub\Invoke-AiGovernanceHub.ps1 -OutputPath "$env:TEMP\govhub-network-new-run" -Mode Network
+```
 
 Run focused orchestration tests without Azure access, clones or installed modules:
 

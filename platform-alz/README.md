@@ -32,6 +32,17 @@ bootstrap. Existing private bootstrap storage and its state are left untouched.
 
 ## Version-controlled configuration
 
+[private-dns.bicep](config/private-dns.bicep) is a separate, reusable platform
+DNS deployment used by the [GovHub workflow](../.github/workflows/ai-governance-hub-deploy.yml).
+It creates shared zones in platform `rg-DNS` and links them to all VNets discovered
+in the configured platform/workload subscriptions, without a Private Resolver
+or autoregistration. This is not part of the ALZ stack deployment: keep
+`deployPrivateDnsZones: false` in the ALZ hub parameters to avoid duplicate zone
+ownership. GovHub preparation also adds cross-subscription peerings to the
+existing hub; it does not modify its subnets or firewall routing. See the
+[GovHub networking guidance](../ai-governance-hub/README.md#provider-readiness-and-network-preparation)
+for permissions, execution order and migration cautions.
+
 - [inputs.yaml](config/inputs.yaml): based on the official Bicep local bootstrap
   example; Azure bootstrap resource creation is disabled.
 - [platform-landing-zone.yaml](config/platform-landing-zone.yaml): based on the
