@@ -11,7 +11,8 @@ No existing
 firewall group is replaced. Invoke-PlatformDns.ps1 alone creates DNS zones and links.
 The /27 uses a workload-profile environment with only Consumption, not the legacy
 Consumption-only environment (which needs /23 and cannot enforce these UDRs).
-Run requires a full public-repository commit SHA and an ephemeral process GH_TOKEN.
+Run requires a full public-repository commit SHA and an ephemeral process GH_TOKEN,
+except explicit Handoff: Azure-only administrator execution with no GitHub credentials/check.
 SecretParameters keys become secret-ref environment variables, never plaintext start values.
 Cleanup requires GitHubRunId and removes only that run's secrets after executions stop.
 Repeat Bootstrap with the GitHub identity after Provision to append discovered private
@@ -138,6 +139,11 @@ function Invoke-HostArm {
     param([string]$Method, [string]$Id, [string]$ApiVersion, [hashtable]$Body, [switch]$AllowMissing, [string]$Query, [string]$ETag)
     $url = "https://management.azure.com${Id}?api-version=$ApiVersion"
     if ($Query) { $url += "&$Query" }
+    if ($ETag) {
+        # az rest's header parser can corrupt weak ETag quotes. Conditional
+        # writes use the HTTP header directly, without CLI/shell interpolation.
+        return (Invoke-HostMemoryArm $Method $Id $Body -Url $url -IfMatch $ETag).Value
+    }
     $arguments = @('rest', '--method', $Method, '--url', $url)
     $bodyPath = $null
     try {
@@ -145,7 +151,6 @@ function Invoke-HostArm {
             $bodyPath = Join-Path (Get-Location) ".ai-agent-host-$([guid]::NewGuid().ToString('N')).json"
             $Body | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $bodyPath -Encoding utf8
             $arguments += @('--body', "@$bodyPath", '--headers', 'Content-Type=application/json')
-            if ($ETag) { $arguments += "If-Match=$ETag" }
         }
         Invoke-HostAz $arguments -AllowMissing:$AllowMissing
     } finally {
@@ -153,20 +158,29 @@ function Invoke-HostArm {
     }
 }
 
+function New-HostHttpRequest {
+    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json, [string]$IfMatch)
+    if ($IfMatch -and $IfMatch -cnotmatch '^(?:W/)?"[^"\r\n]+"$') { throw 'If-Match must be an exact quoted strong/weak ETag, never a wildcard.' }
+    $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), $Url)
+    $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $Token)
+    $request.Headers.UserAgent.ParseAdd('ato-private-job-controller/1.0')
+    $request.Headers.Accept.ParseAdd('application/json')
+    if ($IfMatch) { $request.Headers.Add('If-Match', $IfMatch) }
+    if ($Url.StartsWith('https://api.github.com/')) { $request.Headers.Add('X-GitHub-Api-Version', '2022-11-28') }
+    if (-not [string]::IsNullOrEmpty($Json)) { $request.Content = [Net.Http.StringContent]::new($Json, [Text.Encoding]::UTF8, 'application/json') }
+    $request
+}
+
 function Invoke-HostHttp {
-    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json)
+    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json, [string]$IfMatch)
     $handler = [Net.Http.HttpClientHandler]::new()
     $handler.AllowAutoRedirect = $false
     $client = [Net.Http.HttpClient]::new($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(120)
-    $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), $Url)
+    $request = $null
     $response = $null
     try {
-        $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $Token)
-        $request.Headers.UserAgent.ParseAdd('ato-private-job-controller/1.0')
-        $request.Headers.Accept.ParseAdd('application/json')
-        if ($Url.StartsWith('https://api.github.com/')) { $request.Headers.Add('X-GitHub-Api-Version', '2022-11-28') }
-        if ($null -ne $Json) { $request.Content = [Net.Http.StringContent]::new($Json, [Text.Encoding]::UTF8, 'application/json') }
+        $request = New-HostHttpRequest $Method $Url $Token $Json $IfMatch
         $response = $client.SendAsync($request).GetAwaiter().GetResult()
         @{
             StatusCode = [int]$response.StatusCode
@@ -176,12 +190,13 @@ function Invoke-HostHttp {
     } catch { throw "HTTPS $Method transport failed; response and credentials omitted." }
     finally {
         if ($response) { $response.Dispose() }
-        $request.Dispose(); $client.Dispose()
+        if ($request) { $request.Dispose() }
+        $client.Dispose()
     }
 }
 
 function Invoke-HostMemoryRequest {
-    param([string]$Method, [string]$Url, [string]$Token, [hashtable]$Body)
+    param([string]$Method, [string]$Url, [string]$Token, [hashtable]$Body, [string]$IfMatch)
     $uri = $null
     if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
         $uri.Host -notin @('management.azure.com', 'api.github.com') -or $uri.Port -ne 443 -or $uri.UserInfo) {
@@ -189,7 +204,7 @@ function Invoke-HostMemoryRequest {
     }
     $json = if ($null -ne $Body) { $Body | ConvertTo-Json -Depth 40 -Compress } else { $null }
     for ($attempt = 0; $attempt -lt 5; $attempt++) {
-        $response = Invoke-HostHttp $Method $Url $Token $json
+        $response = Invoke-HostHttp $Method $Url $Token $json -IfMatch $IfMatch
         if ($response.StatusCode -in @(429, 500, 502, 503, 504) -and $Method -in @('GET', 'PATCH') -and $attempt -lt 4) {
             Wait-HostDelay (5 * ($attempt + 1))
             continue
@@ -209,7 +224,7 @@ function Invoke-HostMemoryRequest {
 }
 
 function Invoke-HostMemoryArm {
-    param([string]$Method, [string]$Id, [hashtable]$Body, [string]$Url)
+    param([string]$Method, [string]$Id, [hashtable]$Body, [string]$Url, [string]$IfMatch)
     $token = Invoke-HostAz @('account', 'get-access-token', '--resource', 'https://management.azure.com/')
     if (-not $token['accessToken']) { throw 'Azure controller access token is unavailable.' }
     if (-not $Url) { $Url = "https://management.azure.com${Id}?api-version=$script:HostAppApi" }
@@ -217,7 +232,7 @@ function Invoke-HostMemoryArm {
     if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or $uri.Host -ne 'management.azure.com') {
         throw 'ARM credentials must never be sent to a non-ARM operation URL.'
     }
-    try { Invoke-HostMemoryRequest $Method $Url $token.accessToken $Body }
+    try { Invoke-HostMemoryRequest $Method $Url $token.accessToken $Body -IfMatch $IfMatch }
     finally { $token = $null }
 }
 
@@ -712,6 +727,7 @@ function Ensure-HostDeploymentSubnet {
         return
     }
     if ($ValidateOnly) { throw 'Deployment subnet is not delegated to Microsoft.App/environments. Bootstrap first.' }
+    if (-not $subnet['etag'] -or $subnet.etag -eq '*') { throw 'Existing deployment subnet lacks a usable ETag; refusing unconditional migration.' }
     if (Invoke-HostArm GET $s.LegacyVmId '2024-07-01' -AllowMissing) { throw 'Legacy deployment VM exists; refusing subnet migration or VM deletion.' }
     $nic = Invoke-HostArm GET $s.LegacyNicId '2024-05-01' -AllowMissing
     if ($nic) {
@@ -741,6 +757,22 @@ function Ensure-HostDeploymentSubnet {
         while (Invoke-HostArm GET $s.LegacyNicId '2024-05-01' -AllowMissing) {
             if ([DateTime]::UtcNow -ge $deadline) { throw 'Legacy unused NIC deletion did not complete.' }
             Wait-HostDelay 10
+        }
+        # Removing a NIC also changes its subnet/VNet ETag. Use the completed
+        # post-delete snapshot, not the pre-delete body or optimistic-lock token.
+        $subnet = Wait-HostResource $s.SubnetId '2024-05-01' -TimeoutSeconds 300
+        $p = $subnet.properties
+        Assert-HostSubset $p @{ addressPrefix = $s.SubnetPrefix; defaultOutboundAccess = $false; routeTable = @{ id = $s.RouteId } }
+        foreach ($field in @('natGateway', 'serviceEndpoints', 'privateEndpoints', 'delegations', 'ipConfigurations')) {
+            if ($p[$field]) { throw "Deployment subnet changed after legacy NIC deletion ($field); refusing migration." }
+        }
+        if (-not $subnet['etag'] -or $subnet.etag -eq '*') { throw 'Refreshed deployment subnet lacks a usable ETag; refusing unconditional migration.' }
+        $copy = $p | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable
+        if ($p['networkSecurityGroup']) {
+            if ($p.networkSecurityGroup.id -ne $s.LegacyNsgId) { throw 'Subnet NSG association changed after NIC deletion; refusing to detach it.' }
+            $nsg = Invoke-HostArm GET $s.LegacyNsgId '2024-05-01'
+            Assert-HostSubset $nsg @{ tags = @{ deploymentHost = $script:HostOwner } }
+            $copy.Remove('networkSecurityGroup')
         }
     }
     foreach ($field in @('provisioningState', 'ipConfigurations', 'serviceAssociationLinks', 'resourceNavigationLinks')) { $copy.Remove($field) }
@@ -1035,7 +1067,8 @@ function Invoke-AiAgentHost {
     if ($Repository -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*/[a-zA-Z0-9][a-zA-Z0-9_.-]*$' -or
         $Revision -notmatch '^[0-9a-fA-F]{40}$' -or $Phase -notin @('Provision', 'Publish', 'Verify', 'Handoff') -or
         $GitHubRunId -notmatch '^[1-9][0-9]{0,19}$') { throw 'Run requires public owner/repo, full Revision40, supported Phase and exact numeric GitHubRunId.' }
-    if (-not $env:GH_TOKEN) { throw 'Run requires ephemeral GH_TOKEN with same-repository checks:write and actions:read permissions.' }
+    $handoff = $Phase -eq 'Handoff'
+    if (-not $handoff -and -not $env:GH_TOKEN) { throw 'Run requires ephemeral GH_TOKEN with same-repository checks:write and actions:read permissions.' }
     $reserved = @('GH_TOKEN', 'ATO_REPOSITORY', 'ATO_REVISION', 'ATO_PHASE', 'ATO_GITHUB_RUN_ID', 'ATO_CHECK_RUN_ID', 'AZURE_CLIENT_ID', 'PATH', 'BASH_ENV', 'ENV', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONHOME')
     foreach ($key in $SecretParameters.Keys) {
         if ($key -isnot [string] -or $key -cnotmatch '^[A-Z][A-Z0-9_]{0,63}$' -or $key -in $reserved -or
@@ -1049,20 +1082,26 @@ function Invoke-AiAgentHost {
     $script:HostSensitiveValues = @($env:GH_TOKEN) + @($SecretParameters.Values)
     $id = $null; $check = $null; $succeeded = $false
     try {
-        $check = Invoke-HostGitHub POST $Repository 'check-runs' @{
-            name = "Private deployment: $Phase"; head_sha = $Revision.ToLowerInvariant(); status = 'in_progress'
-            external_id = "ato-$GitHubRunId-$Phase"
-            details_url = "https://github.com/$Repository/actions/runs/$GitHubRunId"
+        if (-not $handoff) {
+            $check = Invoke-HostGitHub POST $Repository 'check-runs' @{
+                name = "Private deployment: $Phase"; head_sha = $Revision.ToLowerInvariant(); status = 'in_progress'
+                external_id = "ato-$GitHubRunId-$Phase"
+                details_url = "https://github.com/$Repository/actions/runs/$GitHubRunId"
+            }
+            if ($null -eq $check -or "$($check['id'])" -notmatch '^[1-9][0-9]*$') { throw 'GitHub did not return a definitive per-phase check-run ID.' }
         }
-        if ($null -eq $check -or "$($check['id'])" -notmatch '^[1-9][0-9]*$') { throw 'GitHub did not return a definitive per-phase check-run ID.' }
         $prefix = "ato-$GitHubRunId-$([guid]::NewGuid().ToString('N').Substring(0, 8))-"
-        $secrets = @(@{ name = "${prefix}github"; value = $env:GH_TOKEN })
+        $secrets = @()
         $environment = @(
-            @{ name = 'GH_TOKEN'; secretRef = "${prefix}github" },
             @{ name = 'ATO_REPOSITORY'; value = $Repository }, @{ name = 'ATO_REVISION'; value = $Revision.ToLowerInvariant() },
             @{ name = 'ATO_PHASE'; value = $Phase }, @{ name = 'ATO_GITHUB_RUN_ID'; value = $GitHubRunId },
-            @{ name = 'ATO_CHECK_RUN_ID'; value = "$($check.id)" }, @{ name = 'AZURE_CLIENT_ID'; value = $s.ManagedIdentityClientId }
+            @{ name = 'AZURE_CLIENT_ID'; value = $s.ManagedIdentityClientId }
         )
+        if (-not $handoff) {
+            $secrets += @{ name = "${prefix}github"; value = $env:GH_TOKEN }
+            $environment += @{ name = 'GH_TOKEN'; secretRef = "${prefix}github" }
+            $environment += @{ name = 'ATO_CHECK_RUN_ID'; value = "$($check.id)" }
+        }
         $index = 0
         foreach ($key in @($SecretParameters.Keys | Sort-Object)) {
             $name = "${prefix}secret-$index"; $index++
@@ -1074,7 +1113,8 @@ function Invoke-AiAgentHost {
         # POST is deliberately never retried: an uncertain response must not double-deploy.
         $start = Invoke-HostMemoryArm POST "$($s.JobId)/start" @{ containers = @($container) }
         $id = Resolve-HostJobStart $s $start
-        Write-Host "Private Job execution: $id; check-run $($check.id)."
+        if ($check) { Write-Host "Private Job execution: $id; check-run $($check.id)." }
+        else { Write-Host "Private Azure-only Handoff execution: $id." }
         $null = Wait-HostJobExecution $id
         $succeeded = $true
     } catch {
@@ -1111,7 +1151,7 @@ function Invoke-AiAgentHost {
             } finally { $script:HostSensitiveValues = $oldSensitive }
         }
     }
-    @{ jobId = $s.JobId; executionId = $id; checkRunId = $check.id; status = 'Succeeded' } | ConvertTo-Json -Compress
+    @{ jobId = $s.JobId; executionId = $id; checkRunId = if ($check) { $check.id } else { $null }; status = 'Succeeded' } | ConvertTo-Json -Compress
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

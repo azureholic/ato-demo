@@ -9,6 +9,10 @@ exec > >(tee "$log") 2>&1
 report() {
   local result=$?
   trap - EXIT
+  if [[ "${ATO_PHASE:-}" == Handoff ]]; then
+    echo "Private administrator handoff exit code: $result (verified by Azure execution status)."
+    exit "$result"
+  fi
   python - "$result" "$log" <<'PY'
 import json, os, pathlib, re, sys, urllib.request
 code = int(sys.argv[1])

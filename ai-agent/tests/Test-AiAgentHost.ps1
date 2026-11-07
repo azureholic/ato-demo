@@ -37,6 +37,7 @@ function Reset-TestHost {
     $script:failStart = $false
     $script:failCleanup = $false
     $script:badExecutionListing = $false
+    $script:changeAfterNicDelete = $null
     $script:httpQueue = [Collections.Generic.Queue[hashtable]]::new()
     $script:nextState = $null
     $script:checkText = ''
@@ -99,8 +100,10 @@ function Invoke-HostArm {
         throw "Mock resource missing: $Id"
     }
     if ($Method -eq 'PUT') {
+        if ($ETag -and $resources.ContainsKey($Id) -and $resources[$Id]['etag'] -ne $ETag) { throw 'Synthetic HTTP 412 PreconditionFailedEtagMismatch' }
         $value = Copy-TestObject $Body
         $value.id = $Id
+        $value.etag = 'W/"f5edc543-86f7-4ff8-95ed-44d11e54ac82"'
         if (-not $value.ContainsKey('properties')) { $value.properties = @{} }
         $value.properties.provisioningState = 'Succeeded'
         if ($Id -eq $s.IdentityId) {
@@ -116,7 +119,14 @@ function Invoke-HostArm {
         $resources[$Id] = $value
         return $value
     }
-    if ($Method -eq 'DELETE') { $resources.Remove($Id); return }
+    if ($Method -eq 'DELETE') {
+        $resources.Remove($Id)
+        if ($Id -eq $s.LegacyNicId) {
+            $resources[$s.SubnetId].properties.ipConfigurations = @()
+            if ($script:changeAfterNicDelete) { & $script:changeAfterNicDelete }
+        }
+        return
+    }
     throw "Unexpected ARM method $Method."
 }
 function Invoke-HostNativeAz {
@@ -127,17 +137,29 @@ function Invoke-HostNativeAz {
     @{ ExitCode = 0; Text = '{"accessToken":"offlineArmToken"}' }
 }
 function Invoke-HostHttp {
-    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json)
+    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json, [string]$IfMatch)
     $body = if ($null -ne $Json) { $Json | ConvertFrom-Json -AsHashtable } else { $null }
-    $requests.Add(@{ Method = $Method; Url = $Url; Token = $Token; Body = $body; Json = $Json })
+    $request = New-HostHttpRequest $Method $Url $Token $Json $IfMatch
+    try {
+        $header = if ($request.Headers.Contains('If-Match')) { @($request.Headers.GetValues('If-Match'))[0] } else { $null }
+        $requests.Add(@{ Method = $Method; Url = $Url; Token = $Token; Body = $body; Json = $Json; IfMatch = $header })
+    } finally { $request.Dispose() }
     if ($httpQueue.Count) { return $httpQueue.Dequeue() }
     $uri = [Uri]$Url
     $id = $uri.AbsolutePath
+    if ($IfMatch -and $resources.ContainsKey($id) -and $header -ne $resources[$id]['etag']) {
+        return @{ StatusCode = 412; Text = '{"error":{"code":"PreconditionFailedEtagMismatch"}}'; Location = $null }
+    }
     if ($uri.Host -eq 'api.github.com') {
         $value = @{ id = 987; output = @{ summary = 'private bounded tail'; text = $script:checkText } }
         return @{ StatusCode = 200; Text = ($value | ConvertTo-Json -Depth 20); Location = $null }
     }
-    if ($id -eq "$($s.JobId)/listSecrets") { $value = @{ value = @($script:secrets) } }
+    if ($Method -eq 'PUT' -and $id -eq $s.SubnetId) { $value = Copy-TestObject $body; $resources[$id] = $value }
+    elseif ($Method -eq 'DELETE' -and $id -eq $s.LegacyNicId) {
+        $resources.Remove($id)
+        return @{ StatusCode = 204; Text = ''; Location = $null }
+    }
+    elseif ($id -eq "$($s.JobId)/listSecrets") { $value = @{ value = @($script:secrets) } }
     elseif ($id -eq $s.JobId -and $Method -eq 'PATCH') {
         if ($script:failCleanup -and $body.properties.configuration.secrets.Count -eq 0) {
             return @{ StatusCode = 403; Text = '{"error":{"code":"AuthorizationFailed"}}'; Location = $null }
@@ -293,6 +315,42 @@ try {
         Assert-Test ($resources.ContainsKey($s.LegacyNsgId)) 'Old NSG/infrastructure not deleted.'
         Assert-Test (-not $resources[$s.SubnetId].properties.ContainsKey('networkSecurityGroup') -and $resources[$s.SubnetId].properties.delegations[0].properties.serviceName -eq 'Microsoft.App/environments') 'Only incompatible owned association detached; subnet delegated.'
     }
+    Test-Case 'Conditional PUT and bodyless DELETE preserve the real weak ETag in HTTP headers' {
+        New-TestLegacySubnet
+        $etag = 'W/"f5edc543-86f7-4ff8-95ed-44d11e54ac82"'
+        $body = @{ properties = (Copy-TestObject $resources[$s.SubnetId].properties) }
+        $null = & $script:realHostArm PUT $s.SubnetId '2024-05-01' $body -ETag $etag
+        $resources[$s.LegacyNicId].etag = $etag
+        $null = & $script:realHostArm DELETE $s.LegacyNicId '2024-05-01' -ETag $etag
+        Assert-Test ($requests.Count -eq 2 -and $requests[0].IfMatch -ceq $etag -and $requests[1].IfMatch -ceq $etag) 'Actual HttpRequestMessage preserves W/"GUID" exactly, without duplicate W/ or quote stripping.'
+        Assert-Test ($requests[0].Url.EndsWith('?api-version=2024-05-01') -and $requests[1].Method -eq 'DELETE') 'Conditional network API/version and bodyless DELETE are preserved.'
+        Assert-Test (-not $requests[1].Json) 'DELETE needs no body to carry its optimistic-lock header.'
+        Assert-Test (@($nativeCalls | Where-Object { $_.Arguments[0] -eq 'rest' }).Count -eq 0) 'Conditional headers never pass through Azure CLI parsing.'
+        Assert-Test (@(Get-ChildItem (Get-Location) -Filter '.ai-agent-host-*.json').Count -eq 0) 'Conditional bodies stay in memory.'
+    }
+    Test-Case 'HTTP 412 remains an explicit failure without wildcard or blind retries' {
+        $httpQueue.Enqueue(@{ StatusCode = 412; Text = '{"error":{"code":"PreconditionFailedEtagMismatch"}}'; Location = $null })
+        Assert-Throws { & $script:realHostArm PUT $s.SubnetId '2024-05-01' @{ properties = @{} } -ETag 'W/"f5edc543-86f7-4ff8-95ed-44d11e54ac82"' } 'HTTP 412, code=PreconditionFailedEtagMismatch'
+        Assert-Test ($requests.Count -eq 1) 'No 412 retry or unconditional success fallback.'
+        Assert-Throws { New-HostHttpRequest PUT 'https://management.azure.com/owned' private '{}' '*' } 'never a wildcard'
+    }
+    Test-Case 'NIC deletion ETag changes are refetched with a fully revalidated subnet snapshot' {
+        New-TestLegacySubnet
+        $script:changeAfterNicDelete = { $resources[$s.SubnetId].etag = 'W/"22222222-2222-2222-2222-222222222222"' }
+        Ensure-HostDeploymentSubnet $s
+        $put = @($calls | Where-Object { $_.Method -eq 'PUT' -and $_.Id -eq $s.SubnetId })[0]
+        Assert-Test ($put.ETag -ceq 'W/"22222222-2222-2222-2222-222222222222"') 'Post-delete ETag is used without relaxing optimistic concurrency.'
+        Assert-Test (@($calls | Where-Object { $_.Method -eq 'DELETE' }).Count -eq 1) 'Still removes only exact safe owned NIC.'
+    }
+    Test-Case 'Concurrent subnet reassociation after NIC deletion is never discarded' {
+        New-TestLegacySubnet
+        $script:changeAfterNicDelete = {
+            $resources[$s.SubnetId].etag = 'W/"22222222-2222-2222-2222-222222222222"'
+            $resources[$s.SubnetId].properties.routeTable.id = '/foreign/route-table'
+        }
+        Assert-Throws { Ensure-HostDeploymentSubnet $s } 'routeTable.*differs'
+        Assert-Test (@($calls | Where-Object Method -eq PUT).Count -eq 0) 'Fresh unexpected association blocks delegation PUT.'
+    }
     Test-Case 'Live VM reference or foreign NIC prevents legacy deletion' {
         New-TestLegacySubnet
         $resources[$s.LegacyVmId] = @{ properties = @{} }
@@ -317,13 +375,13 @@ try {
     Test-Case 'Run transports GH token and Handoff secrets only as encrypted Job secrets' {
         Bootstrap-TestHost
         $params = @{ UI_OAUTH_CLIENT_SECRET = 'privateOAuthValue'; UI_OAUTH_EXPIRES = '2099-01-01'; CHAINLIT_AUTH_SECRET = 'privateChainlitValue' }
-        Invoke-TestHost Run @{ SecretParameters = $params; Phase = 'Handoff' } | Out-Null
+        Invoke-TestHost Run @{ SecretParameters = $params; Phase = 'Provision' } | Out-Null
         $start = @($requests | Where-Object { $_.Url -match '/start\?' })[0]
         $container = $start.Body.containers[0]
         Assert-Test ($container.image -eq $script:HostWorkerImage -and $container.command[0] -eq '/bin/bash') 'Immutable public MCR Python worker, no custom Docker builder.'
         Assert-Test ($container.args[1] -match 'raw.githubusercontent.com/azureholic/ato-demo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ai-agent/Run-AiAgentJob.sh' -and $container.args[1] -notmatch 'Authorization|GH_TOKEN|docker') 'Public script pinned by SHA and fetched without credentials.'
         foreach ($key in @('ATO_REPOSITORY', 'ATO_REVISION', 'ATO_PHASE', 'ATO_GITHUB_RUN_ID', 'ATO_CHECK_RUN_ID', 'AZURE_CLIENT_ID')) { Assert-Test (@($container.env | Where-Object name -eq $key).Count -eq 1) "Parent-required env $key exists." }
-        Assert-Test (@($container.env | Where-Object name -eq 'ATO_PHASE')[0].value -eq 'Handoff') 'Handoff remains a distinct parent-supported phase.'
+        Assert-Test (@($container.env | Where-Object name -eq 'ATO_PHASE')[0].value -eq 'Provision') 'Normal phases retain GitHub checks and token.'
         foreach ($key in @('GH_TOKEN') + @($params.Keys)) {
             $entry = @($container.env | Where-Object name -eq $key)[0]
             Assert-Test ($entry.ContainsKey('secretRef') -and -not $entry.ContainsKey('value')) "$key is a secret reference, never a plain start environment value."
@@ -334,6 +392,29 @@ try {
         Assert-Test ($script:secrets.Count -eq 0 -and $script:HostSensitiveValues.Count -eq 0) 'Own secrets and redaction references cleared.'
         foreach ($native in $nativeCalls) { Assert-Test (($native.Arguments -join ' ') -notmatch 'privateOAuthValue|ghs_offlineToken|--body') 'No token/secret command-line transport or body files.' }
         Assert-Test (@(Get-ChildItem (Get-Location) -Filter '.ai-agent-host-*.json').Count -eq 0) 'No secret-bearing temporary JSON files.'
+    }
+    Test-Case 'Explicit administrator Handoff needs no GitHub token, API or check-run' {
+        Bootstrap-TestHost
+        $env:GH_TOKEN = ''
+        $parameters = @{ UI_OAUTH_CLIENT_SECRET = 'privateAdminOAuth'; UI_OAUTH_EXPIRES = '2099-01-01'; CHAINLIT_AUTH_SECRET = 'privateAdminChainlit' }
+        $result = Invoke-TestHost Run @{ SecretParameters = $parameters; Phase = 'Handoff' } | ConvertFrom-Json -AsHashtable
+        Assert-Test ($result.status -eq 'Succeeded' -and $null -eq $result.checkRunId) 'Azure execution status proves successful Handoff without GitHub check fallback.'
+        $start = @($requests | Where-Object { $_.Url -match '/start\?' })[0]
+        Assert-Test (@($start.Body.containers[0].env | Where-Object { $_.name -in @('GH_TOKEN', 'ATO_CHECK_RUN_ID') }).Count -eq 0) 'No token or check reference enters Handoff execution.'
+        foreach ($name in $parameters.Keys) {
+            Assert-Test (@($start.Body.containers[0].env | Where-Object name -eq $name)[0].ContainsKey('secretRef')) 'Handoff secrets remain encrypted ACA references.'
+        }
+        Assert-Test (@($requests | Where-Object { $_.Url.StartsWith('https://api.github.com/') }).Count -eq 0 -and $script:secrets.Count -eq 0) 'No GitHub API calls; mandatory cleanup completed.'
+        $env:GH_TOKEN = 'oauthLocalUserToken'
+        Invoke-TestHost Run @{ SecretParameters = $parameters; Phase = 'Handoff' } | Out-Null
+        Assert-Test (@($requests | Where-Object { $_.Json -match 'oauthLocalUserToken' -or $_.Token -eq 'oauthLocalUserToken' }).Count -eq 0) 'Even a present OAuth token is not transported or used in Handoff.'
+    }
+    Test-Case 'Azure-only Handoff failure still validates real execution and cleans credentials' {
+        Bootstrap-TestHost
+        $env:GH_TOKEN = ''
+        $script:executionState = 'Failed'
+        Assert-Throws { Invoke-TestHost Run @{ Phase = 'Handoff'; SecretParameters = @{ UI_OAUTH_CLIENT_SECRET = 'privateAdminOAuth' } } } 'status=Failed'
+        Assert-Test ($script:secrets.Count -eq 0 -and @($requests | Where-Object { $_.Url.StartsWith('https://api.github.com/') }).Count -eq 0) 'Failed Handoff removes only its secrets without attempting OAuth check-run creation.'
     }
     Test-Case 'Real execution failure cannot pass because ARM provisioning succeeded' {
         Bootstrap-TestHost

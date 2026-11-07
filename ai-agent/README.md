@@ -52,3 +52,5 @@ Before first application publication:
 3. Configure upstream's UI OAuth settings with the registered client and exposed UI API scope, keeping the downstream Foundry audience separate. Add only the approved caller/source RBAC grants and verify sign-in and OBO.
 
 The workflow explicitly fails publication when required vault secrets are missing. Complete the authorized administrator handoff and rerun; infrastructure is reusable. Normal workflow deployment never changes Graph permissions. Automated deployment verification is not proof of a complete end-user sign-in/OBO session.
+
+The one-time administrator `Handoff` Job uses Azure execution verification without a GitHub token or check-run. Normal workflow phases use their ephemeral GitHub App token for bounded private diagnostics; an administrator's GitHub OAuth token cannot create checks.
