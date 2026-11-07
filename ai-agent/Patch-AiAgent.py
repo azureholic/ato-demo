@@ -9,6 +9,7 @@ import subprocess
 
 TEMPLATE_COMMIT = "a75485015afeddc8b9221538778ef918718ed51f"
 RUNTIME_COMMIT = "666d39862590cfb165097ee55737a1ef66fd2afc"
+UI_COMMIT = "8a45595aa321d8841e7a4555d542b890beebf1b0"
 
 
 def original(root: Path, commit: str, relative: str) -> str:
@@ -102,11 +103,75 @@ def patch_template(root: Path) -> None:
     relative = "infra/bicep/main.bicep"
     source = original(root, TEMPLATE_COMMIT, relative)
     (root / relative).write_text(disable_default_models(source), encoding="utf-8")
+    relative = "scripts/preDeploy.ps1"
+    source = original(root, TEMPLATE_COMMIT, relative)
+    source = replace_once(
+        source, "  # Copy shared azd env into the freshly cloned project",
+        "  if ($name -eq 'agent-app-ui') {\n"
+        "    if (-not $env:ATO_ADAPTER_ROOT -or -not $env:ATO_UI_IMAGE) {\n"
+        "      throw 'The private UI requires the verified workflow image artifact.'\n"
+        "    }\n"
+        "    python (Join-Path $env:ATO_ADAPTER_ROOT 'Patch-AiAgent.py') ui $target\n"
+        "    if ($LASTEXITCODE -ne 0) { throw 'Pinned UI artifact adapter failed.' }\n"
+        "  }\n\n"
+        "  # Copy shared azd env into the freshly cloned project",
+    )
+    (root / relative).write_text(source, encoding="utf-8")
+    relative = "scripts/preDeploy.sh"
+    source = original(root, TEMPLATE_COMMIT, relative)
+    source = replace_once(
+        source, '  deploy_sh="$target/scripts/deploy.sh"',
+        '  if [ "$name" = "agent-app-ui" ]; then\n'
+        '    : "${ATO_ADAPTER_ROOT:?Private UI adapter root is required}"\n'
+        '    : "${ATO_UI_IMAGE:?Verified immutable private UI image is required}"\n'
+        '    python3 "$ATO_ADAPTER_ROOT/Patch-AiAgent.py" ui "$target" || exit 1\n'
+        '  fi\n\n'
+        '  deploy_sh="$target/scripts/deploy.sh"',
+    )
+    (root / relative).write_text(source, encoding="utf-8")
+
+
+def artifact_ui_deploy(source: str) -> str:
+    start = source.find("if ($buildMode -eq 'local') {\n    Write-Blue (\"Logging into ACR")
+    end = source.find("\nWrite-Blue 'Updating container app registry...'", start)
+    if start < 0 or end <= start or source.count("Write-Blue 'Updating container app registry...'") != 1:
+        raise ValueError("Pinned UI deployment build anchors changed.")
+    return source[:start] + (
+        "$fullImageName = \"$env:ATO_UI_IMAGE\"\n"
+        "$expectedRegistry = \"$($values.CONTAINER_REGISTRY_LOGIN_SERVER)/\"\n"
+        "if (-not $fullImageName.StartsWith($expectedRegistry) -or\n"
+        "    $fullImageName -notmatch '^[a-z0-9]+\\.azurecr\\.io/agent-app-ui@sha256:[a-f0-9]{64}$') {\n"
+        "    throw 'UI image must be the verified immutable artifact in the provisioned private registry.'\n"
+        "}\n"
+        "Write-Green \"Deploying verified private UI image: $fullImageName\"\n"
+    ) + source[end:]
+
+
+def patch_ui(root: Path) -> None:
+    relative = "scripts/deploy.ps1"
+    source = original(root, UI_COMMIT, relative)
+    (root / relative).write_text(artifact_ui_deploy(source), encoding="utf-8")
+    relative = "scripts/deploy.sh"
+    source = original(root, UI_COMMIT, relative)
+    start = source.find('if [[ "$buildMode" == "local" ]]; then\n  info "Logging into ACR')
+    end = source.find('\ninfo "Updating container app registry..."', start)
+    if start < 0 or end <= start or source.count('info "Updating container app registry..."') != 1:
+        raise ValueError("Pinned UI Bash deployment build anchors changed.")
+    source = source[:start] + (
+        'imageRef="${ATO_UI_IMAGE:?Verified immutable private UI image is required}"\n'
+        'if [[ "$imageRef" != "$containerRegistryLoginServer/"* ||\n'
+        '      ! "$imageRef" =~ ^[a-z0-9]+\\.azurecr\\.io/agent-app-ui@sha256:[a-f0-9]{64}$ ]]; then\n'
+        '  echo "UI image must be the verified digest in the provisioned private registry." >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'success "Deploying verified private UI image: $imageRef"\n'
+    ) + source[end:]
+    (root / relative).write_text(source, encoding="utf-8")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("template", "runtime", "fingerprint"))
+    parser.add_argument("action", choices=("template", "runtime", "ui", "fingerprint"))
     parser.add_argument("source", type=Path, nargs="?")
     args = parser.parse_args()
     if args.action == "fingerprint":
@@ -115,5 +180,7 @@ if __name__ == "__main__":
         parser.error("A manifest-pinned checkout is required.")
     elif args.action == "template":
         patch_template(args.source)
+    elif args.action == "ui":
+        patch_ui(args.source)
     else:
         patch_runtime(args.source)

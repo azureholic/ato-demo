@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-Creates and operates the isolated, managed-identity deployment VM; never a GitHub runner.
+Creates and operates a private Container Apps Job; never a registered GitHub runner.
 .DESCRIPTION
 Bootstrap requires deploymentHost.egressApproved=true in deployment.json: an operator
 approval of the narrowly source/FQDN-scoped rules installed by Bootstrap in its own
@@ -9,30 +9,37 @@ firewall rule collection group, and Agent forward routing. GovHub uses applicati
 SNAT for flow symmetry; its route tables and private endpoint policies are never changed.
 No existing
 firewall group is replaced. Invoke-PlatformDns.ps1 alone creates DNS zones and links.
-Bootstrap checks the exact deploymentHost.vmSize (default Standard_D4s_v5) against
-subscription/location SKU restrictions before any resource mutation. No size or region
-fallback is attempted; Compute region access is separate from unused vCPU quota.
-Run requires a full commit SHA of a PUBLIC repository and always deallocates the VM.
+The /27 uses a workload-profile environment with only Consumption, not the legacy
+Consumption-only environment (which needs /23 and cannot enforce these UDRs).
+Run requires a full public-repository commit SHA and an ephemeral process GH_TOKEN.
+SecretParameters keys become secret-ref environment variables, never plaintext start values.
+Cleanup requires GitHubRunId and removes only that run's secrets after executions stop.
 Repeat Bootstrap with the GitHub identity after Provision to append discovered private
 registry rules and native subnet routes before Publish. Run only validates shared rules.
 ACR task platform dependencies (Storage/EventHub/KeyVault/Monitor) are NOT implicitly
 allowed: approve exact required endpoints separately; no blanket blob/service-tag rule.
-Workflow concurrency must serialize Bootstrap/Run/Deallocate for this dedicated host.
+Workflow concurrency must serialize Bootstrap/Run/Cleanup for this dedicated executor.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Bootstrap', 'Run', 'Deallocate')]
+    [ValidateSet('Bootstrap', 'Run', 'Cleanup')]
     [string]$Action = 'Bootstrap',
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'config\deployment.json'),
     [string]$Repository = 'azureholic/ato-demo',
     [string]$Revision,
-    [ValidateSet('Full', 'Provision', 'Publish', 'Verify')]
-    [string]$Phase = 'Full'
+    [ValidateSet('Provision', 'Publish', 'Verify', 'Handoff')]
+    [string]$Phase = 'Provision',
+    [string]$GitHubRunId,
+    [hashtable]$SecretParameters = @{},
+    [string[]]$ArtifactHosts = @()
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:HostOwner = 'ai-agent-private-deployment-host'
+$script:HostAppApi = '2025-07-01'
+$script:HostSensitiveValues = @()
+$script:HostWorkerImage = 'mcr.microsoft.com/devcontainers/python:1-3.12-bookworm@sha256:7876580dc67fd460fd962f004cbeb480027e9bbc0657096f1087db11f9eaff39'
 
 function Invoke-HostNativeAz {
     param([string[]]$Arguments)
@@ -146,6 +153,74 @@ function Invoke-HostArm {
     }
 }
 
+function Invoke-HostHttp {
+    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json)
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(120)
+    $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), $Url)
+    $response = $null
+    try {
+        $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $Token)
+        $request.Headers.UserAgent.ParseAdd('ato-private-job-controller/1.0')
+        $request.Headers.Accept.ParseAdd('application/json')
+        if ($Url.StartsWith('https://api.github.com/')) { $request.Headers.Add('X-GitHub-Api-Version', '2022-11-28') }
+        if ($null -ne $Json) { $request.Content = [Net.Http.StringContent]::new($Json, [Text.Encoding]::UTF8, 'application/json') }
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        @{
+            StatusCode = [int]$response.StatusCode
+            Text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            Location = if ($response.Headers.Location) { $response.Headers.Location.ToString() } else { $null }
+        }
+    } catch { throw "HTTPS $Method transport failed; response and credentials omitted." }
+    finally {
+        if ($response) { $response.Dispose() }
+        $request.Dispose(); $client.Dispose()
+    }
+}
+
+function Invoke-HostMemoryRequest {
+    param([string]$Method, [string]$Url, [string]$Token, [hashtable]$Body)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
+        $uri.Host -notin @('management.azure.com', 'api.github.com') -or $uri.Port -ne 443 -or $uri.UserInfo) {
+        throw 'Credential-bearing request requires an approved HTTPS ARM/GitHub endpoint.'
+    }
+    $json = if ($null -ne $Body) { $Body | ConvertTo-Json -Depth 40 -Compress } else { $null }
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        $response = Invoke-HostHttp $Method $Url $Token $json
+        if ($response.StatusCode -in @(429, 500, 502, 503, 504) -and $Method -in @('GET', 'PATCH') -and $attempt -lt 4) {
+            Wait-HostDelay (5 * ($attempt + 1))
+            continue
+        }
+        if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 300) {
+            $errorInfo = Get-HostAzureError $response.Text
+            throw "HTTPS $Method $($uri.AbsolutePath) failed: HTTP $($response.StatusCode), code=$($errorInfo.Code). Response omitted."
+        }
+        $value = $null
+        if (-not [string]::IsNullOrWhiteSpace($response.Text)) {
+            try { $value = $response.Text | ConvertFrom-Json -AsHashtable }
+            catch { throw "HTTPS $Method returned invalid JSON; response omitted." }
+        }
+        if ($Method -eq 'GET' -and $null -eq $value) { throw 'HTTPS GET returned no definitive resource/status data.' }
+        return @{ Value = $value; StatusCode = $response.StatusCode; Location = $response.Location }
+    }
+}
+
+function Invoke-HostMemoryArm {
+    param([string]$Method, [string]$Id, [hashtable]$Body, [string]$Url)
+    $token = Invoke-HostAz @('account', 'get-access-token', '--resource', 'https://management.azure.com/')
+    if (-not $token['accessToken']) { throw 'Azure controller access token is unavailable.' }
+    if (-not $Url) { $Url = "https://management.azure.com${Id}?api-version=$script:HostAppApi" }
+    $uri = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or $uri.Host -ne 'management.azure.com') {
+        throw 'ARM credentials must never be sent to a non-ARM operation URL.'
+    }
+    try { Invoke-HostMemoryRequest $Method $Url $token.accessToken $Body }
+    finally { $token = $null }
+}
+
 function Wait-HostDelay { param([int]$Seconds) Start-Sleep -Seconds $Seconds }
 
 function Wait-HostResource {
@@ -230,8 +305,8 @@ function Get-HostSettings {
     if ($config.resourceGroupName -eq $config.applicationResourceGroupName -or
         $net.resourceGroupName -in @($config.resourceGroupName, $config.applicationResourceGroupName)) { throw 'Agent resource groups must be distinct.' }
     $hostConfig = if ($config.ContainsKey('deploymentHost')) { $config.deploymentHost } else { @{} }
-    $vmSize = if ($hostConfig.ContainsKey('vmSize')) { $hostConfig.vmSize } else { 'Standard_D4s_v5' }
-    if ($vmSize -isnot [string] -or $vmSize -notmatch '^[a-zA-Z0-9_-]{1,80}$') { throw 'deploymentHost.vmSize must be an exact approved VM SKU name.' }
+    if ($config.location -ne 'italynorth') { throw 'Deployment Job must remain in explicitly approved Italy North; no region fallback.' }
+    $appRg = "/subscriptions/$($config.subscriptionId)/resourceGroups/$($config.applicationResourceGroupName)"
     $govPath = (Resolve-Path -LiteralPath (Join-Path (Split-Path $path) $config.governanceHubConfiguration)).Path
     $gov = Get-Content -LiteralPath $govPath -Raw | ConvertFrom-Json -AsHashtable
     if ($net.addressPrefix -ne '10.180.0.0/21' -or $gov.vnetAddressPrefix -ne '10.170.0.0/24' -or
@@ -251,43 +326,19 @@ function Get-HostSettings {
         DnsZoneNames = @($dns.zones.Values | Sort-Object -Unique)
         GovernanceGatewayFqdn = $endpoint.Host.ToLowerInvariant()
         GovernanceDnsZoneId = "/subscriptions/$($dns.subscriptionId)/resourceGroups/$($dns.resourceGroupName)/providers/Microsoft.Network/privateDnsZones/$($dns.zones.apimGateway)"
-        VmName = 'vm-ai-agent-deploy-ita'; VmId = "$rg/providers/Microsoft.Compute/virtualMachines/vm-ai-agent-deploy-ita"
-        VmSize = $vmSize
-        NicId = "$rg/providers/Microsoft.Network/networkInterfaces/nic-ai-agent-deploy-ita"
-        NsgId = "$rg/providers/Microsoft.Network/networkSecurityGroups/nsg-ai-agent-deploy-ita"
+        EnvironmentId = "$appRg/providers/Microsoft.App/managedEnvironments/cae-ai-agent-deploy-ita"
+        JobId = "$appRg/providers/Microsoft.App/jobs/job-ai-agent-deploy-ita"
+        IdentityId = "$appRg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-ai-agent-deploy-ita"
+        LegacyVmId = "$rg/providers/Microsoft.Compute/virtualMachines/vm-ai-agent-deploy-ita"
+        LegacyNicId = "$rg/providers/Microsoft.Network/networkInterfaces/nic-ai-agent-deploy-ita"
+        LegacyNsgId = "$rg/providers/Microsoft.Network/networkSecurityGroups/nsg-ai-agent-deploy-ita"
         RouteId = "$rg/providers/Microsoft.Network/routeTables/rt-ai-agent-deploy-ita"
         SubnetId = "$rg/providers/Microsoft.Network/virtualNetworks/$($net.vnetName)/subnets/snet-deployment-host"
         SubnetPrefix = '10.180.6.0/27'; EgressApproved = ($hostConfig['egressApproved'] -eq $true)
+        ArtifactHosts = @()
         Governance = $gov
         GovernanceVnetId = "/subscriptions/$($gov.subscriptionId)/resourceGroups/$($gov.networking.resourceGroupName)/providers/Microsoft.Network/virtualNetworks/$($gov.networking.vnetName)"
         FirewallPolicyId = "/subscriptions/$($net.hub.subscriptionId)/resourceGroups/$($net.hub.resourceGroupName)/providers/Microsoft.Network/firewallPolicies/afwp-alz-swe"
-    }
-}
-
-function Assert-HostVmAvailability {
-    param([hashtable]$Settings)
-    $c = $Settings.Config
-    $skus = @(Invoke-HostAz @(
-        'vm', 'list-skus', '--subscription', $c.subscriptionId, '--location', $c.location,
-        '--resource-type', 'virtualMachines', '--size', $Settings.VmSize, '--all'
-    ))
-    $selected = @($skus | Where-Object { $_['name'] -eq $Settings.VmSize -and $_['resourceType'] -eq 'virtualMachines' })
-    $context = "Private host SKU '$($Settings.VmSize)' in '$($c.location)' for subscription '$($c.subscriptionId)'"
-    $action = 'Request Italy North Microsoft.Compute regional/SKU access from Azure Support. Unused family vCPU quota does not remove subscription/location restrictions. No other size, public host or region will be selected; another private-host region requires explicit user approval.'
-    if ($selected.Count -ne 1) { throw "$context was not returned as one exact SKU. Availability is unknown; verify the configured SKU and regional Compute access. $action" }
-    $sku = $selected[0]
-    if ($c.location -notin @($sku['locations'])) { throw "$context is not available in the explicitly configured location. $action" }
-    if (-not $sku.ContainsKey('restrictions') -or $null -eq $sku['restrictions']) { throw "$context has no definitive restriction data. Availability is unknown. $action" }
-    foreach ($restriction in $sku.restrictions) {
-        # This host is deliberately nonzonal: zone-only exclusions do not prohibit it.
-        if ($restriction['type'] -eq 'Zone') { continue }
-        if ($restriction['type'] -ne 'Location') { throw "$context has an unknown restriction type; refusing to assume availability. $action" }
-        $locations = @($restriction['values'] | Where-Object { $_ })
-        if ($restriction['restrictionInfo']) { $locations += @($restriction.restrictionInfo['locations'] | Where-Object { $_ }) }
-        if ($locations.Count -eq 0 -or $c.location -in $locations) {
-            $reason = if ($restriction['reasonCode']) { $restriction.reasonCode } else { 'unspecified' }
-            throw "$context is blocked by a Location restriction ($reason). $action"
-        }
     }
 }
 
@@ -339,6 +390,18 @@ function Get-HostGovHubEndpoints {
     @{ Ips = $addresses; Fqdn = $Settings.GovernanceGatewayFqdn }
 }
 
+function New-HostArtifactRule {
+    param([hashtable]$Settings, [string]$HostName)
+    if ($HostName -notmatch '^(?:productionresultssa[0-9]+|pipelinesghub[a-z0-9]+)\.blob\.core\.windows\.net$') {
+        throw 'ArtifactHosts requires exact approved GitHub artifact storage hostnames, never URLs/SAS/wildcards.'
+    }
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($HostName))).Substring(0, 12).ToLowerInvariant()
+    @{
+        name = "github-artifact-$hash"; ruleType = 'ApplicationRule'; sourceAddresses = @($Settings.SubnetPrefix)
+        targetFqdns = @($HostName); protocols = @(@{ protocolType = 'Https'; port = 443 })
+    }
+}
+
 function Get-HostFirewallCollections {
     param([hashtable]$Settings, [string[]]$GatewayIps)
     $packages = @(
@@ -360,8 +423,7 @@ function Get-HostFirewallCollections {
             @{ name = 'agent-azure-control'; ruleType = 'ApplicationRule'; sourceAddresses = @($Settings.Config.networking.addressPrefix); targetFqdns = @('management.azure.com', 'login.microsoftonline.com'); protocols = @(@{ protocolType = 'Https'; port = 443 }) }
         )
     })
-    # Append a distinct collection so previously bootstrapped rules stay unchanged.
-    # The pinned custom-app Dockerfiles contain no APT command, so HTTP is not needed.
+    # Preserve existing HTTPS mirrors; the Debian Job HTTP exception is separate.
     $collections.Add(@{
         name = 'ai-agent-apt-mirrors-https'; priority = 250; ruleCollectionType = 'FirewallPolicyFilterRuleCollection'; action = @{ type = 'Allow' }
         rules = @(@{
@@ -378,6 +440,37 @@ function Get-HostFirewallCollections {
             targetFqdns = @('openaipublic.blob.core.windows.net'); protocols = @(@{ protocolType = 'Https'; port = 443 })
         })
     })
+    # Required ACA workload-profile infrastructure/identity FQDNs, per
+    # https://learn.microsoft.com/azure/container-apps/use-azure-firewall .
+    $collections.Add(@{
+        name = 'ai-agent-job-platform-https'; priority = 280; ruleCollectionType = 'FirewallPolicyFilterRuleCollection'; action = @{ type = 'Allow' }
+        rules = @(@{
+            name = 'private-job-platform'; ruleType = 'ApplicationRule'; sourceAddresses = @($Settings.SubnetPrefix)
+            targetFqdns = @('packages.aks.azure.com', 'acs-mirror.azureedge.net', '*.identity.azure.net', '*.login.microsoftonline.com', '*.login.microsoft.com')
+            protocols = @(@{ protocolType = 'Https'; port = 443 })
+        })
+    })
+    $collections.Add(@{
+        name = 'ai-agent-job-cli-packages'; priority = 282; ruleCollectionType = 'FirewallPolicyFilterRuleCollection'; action = @{ type = 'Allow' }
+        rules = @(@{
+            name = 'exact-azure-cli-package-stores'; ruleType = 'ApplicationRule'; sourceAddresses = @($Settings.SubnetPrefix)
+            targetFqdns = @('azcliextensionsync.blob.core.windows.net', 'azcliprod.blob.core.windows.net')
+            protocols = @(@{ protocolType = 'Https'; port = 443 })
+        })
+    })
+    $collections.Add(@{
+        name = 'ai-agent-job-debian-apt-http'; priority = 285; ruleCollectionType = 'FirewallPolicyFilterRuleCollection'; action = @{ type = 'Allow' }
+        rules = @(@{
+            name = 'signed-debian-packages-only'; ruleType = 'ApplicationRule'; sourceAddresses = @($Settings.SubnetPrefix)
+            targetFqdns = @('deb.debian.org', 'security.debian.org'); protocols = @(@{ protocolType = 'Http'; port = 80 })
+        })
+    })
+    if ($Settings.ArtifactHosts.Count -gt 0) {
+        $collections.Add(@{
+            name = 'ai-agent-job-artifacts'; priority = 290; ruleCollectionType = 'FirewallPolicyFilterRuleCollection'; action = @{ type = 'Allow' }
+            rules = @($Settings.ArtifactHosts | ForEach-Object { New-HostArtifactRule $Settings $_ })
+        })
+    }
     $registryIndex = 0
     foreach ($rg in @($Settings.Config.resourceGroupName, $Settings.Config.applicationResourceGroupName, $Settings.Config.networking.resourceGroupName)) {
         $id = "/subscriptions/$($Settings.Config.subscriptionId)/resourceGroups/$rg/providers/Microsoft.ContainerRegistry/registries"
@@ -432,7 +525,19 @@ function Ensure-HostFirewall {
     foreach ($collection in $desired) {
         $match = @($merged | Where-Object { $_.name -eq $collection.name })
         if ($match.Count -gt 1) { throw 'Duplicate collection name in dedicated firewall group.' }
-        if ($match.Count -eq 1) { Assert-HostSubset $match[0] $collection $id } else {
+        if ($match.Count -eq 1 -and $collection.name -eq 'ai-agent-job-artifacts') {
+            foreach ($rule in $match[0].rules) {
+                if (@($rule.targetFqdns).Count -ne 1) { throw 'Unexpected existing artifact rule destinations.' }
+                Assert-HostSubset $rule (New-HostArtifactRule $Settings $rule.targetFqdns[0])
+            }
+            Assert-HostSubset $match[0] @{ priority = 290; ruleCollectionType = 'FirewallPolicyFilterRuleCollection'; action = @{ type = 'Allow' } }
+            foreach ($rule in $collection.rules) {
+                if ($rule.name -notin @($match[0].rules | ForEach-Object { $_.name })) {
+                    if ($ValidateOnly) { throw 'Exact same-run artifact host is not yet approved. Bootstrap with ArtifactHosts first.' }
+                    $match[0].rules = @($match[0].rules) + @($rule); $changed = $true
+                }
+            }
+        } elseif ($match.Count -eq 1) { Assert-HostSubset $match[0] $collection $id } else {
             if ($ValidateOnly) { throw 'Required scoped firewall rules are missing. Rerun Bootstrap from the GitHub identity after Provision, before Publish.' }
             $merged = @($merged) + @($collection)
             $changed = $true
@@ -580,90 +685,68 @@ function Ensure-HostNetwork {
             )
         }
     } -ValidateOnly:$ValidateOnly
-    # The UDR forces HTTP(S) through the shared firewall's EXISTING approved rules.
-    # Azure-provided DNS bypasses ordinary NSG rules. AzurePlatformDNS is a
-    # deny-only override tag, so an Allow rule for it is invalid.
-    $rules = @(
-        @{ name = 'deny-all-inbound'; properties = @{ priority = 100; direction = 'Inbound'; access = 'Deny'; protocol = '*'; sourcePortRange = '*'; destinationPortRange = '*'; sourceAddressPrefix = '*'; destinationAddressPrefix = '*' } },
-        @{ name = 'vm-agent'; properties = @{ priority = 100; direction = 'Outbound'; access = 'Allow'; protocol = 'Tcp'; sourcePortRange = '*'; destinationPortRanges = @('80', '32526'); sourceAddressPrefix = '*'; destinationAddressPrefix = '168.63.129.16' } },
-        @{ name = 'managed-identity'; properties = @{ priority = 120; direction = 'Outbound'; access = 'Allow'; protocol = 'Tcp'; sourcePortRange = '*'; destinationPortRange = '80'; sourceAddressPrefix = '*'; destinationAddressPrefix = '169.254.169.254' } },
-        @{ name = 'firewall-controlled-web'; properties = @{ priority = 130; direction = 'Outbound'; access = 'Allow'; protocol = 'Tcp'; sourcePortRange = '*'; destinationPortRange = '443'; sourceAddressPrefix = '*'; destinationAddressPrefix = '*' } },
-        @{ name = 'deny-other-outbound'; properties = @{ priority = 4000; direction = 'Outbound'; access = 'Deny'; protocol = '*'; sourcePortRange = '*'; destinationPortRange = '*'; sourceAddressPrefix = '*'; destinationAddressPrefix = '*' } }
-    )
-    $null = Ensure-HostResource $s.NsgId '2024-05-01' @{ location = $c.location; tags = $tags; properties = @{ securityRules = $rules } } -ValidateOnly:$ValidateOnly
-    $null = Ensure-HostResource $s.SubnetId '2024-05-01' @{
-        properties = @{ addressPrefix = $s.SubnetPrefix; defaultOutboundAccess = $false; networkSecurityGroup = @{ id = $s.NsgId }; routeTable = @{ id = $s.RouteId } }
-    } -ValidateOnly:$ValidateOnly
-    $subnet = Invoke-HostArm GET $s.SubnetId '2024-05-01'
-    foreach ($field in @('natGateway', 'serviceEndpoints', 'delegations')) {
-        if ($subnet.properties[$field]) { throw "Deployment subnet has unexpected $field; isolation cannot be guaranteed." }
-    }
-    $null = Ensure-HostResource $s.NicId '2024-05-01' @{
-        location = $c.location; tags = $tags; properties = @{
-            enableIPForwarding = $false
-            ipConfigurations = @(@{ name = 'private'; properties = @{ privateIPAllocationMethod = 'Dynamic'; subnet = @{ id = $s.SubnetId } } })
-        }
-    } -ValidateOnly:$ValidateOnly
-    Assert-HostPrivateNic $s
+    Ensure-HostDeploymentSubnet $s -ValidateOnly:$ValidateOnly
     $s.HubFirewallPrivateIp = $firewallIp
 }
 
-function Assert-HostPrivateNic {
-    param([hashtable]$Settings)
-    $nic = Invoke-HostArm GET $Settings.NicId '2024-05-01'
-    foreach ($ip in $nic.properties.ipConfigurations) {
-        if ($ip.properties.ContainsKey('publicIPAddress') -and $ip.properties.publicIPAddress) { throw 'Dedicated NIC has a public IP; refusing operation.' }
-    }
-    Assert-HostSubset $nic.properties @{
-        enableIPForwarding = $false
-        ipConfigurations = @(@{ name = 'private'; properties = @{ subnet = @{ id = $Settings.SubnetId } } })
-    }
-}
-
-function New-HostSshKey {
-    $keyRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { (Get-Location).Path }
-    $keyPath = Join-Path $keyRoot "ai-agent-host-$([guid]::NewGuid().ToString('N'))"
-    try {
-        & ssh-keygen -q -t rsa -b 3072 -N '' -f $keyPath
-        if ($LASTEXITCODE -ne 0) { throw 'Failed generating ephemeral SSH public key.' }
-        Get-Content -LiteralPath "$keyPath.pub" -Raw
-    } finally {
-        foreach ($file in @($keyPath, "$keyPath.pub")) {
-            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
-        }
-    }
-}
-
-function Ensure-HostVm {
-    param([hashtable]$Settings)
+function Ensure-HostDeploymentSubnet {
+    param([hashtable]$Settings, [switch]$ValidateOnly)
     $s = $Settings
-    $expected = @{
-        location = $s.Config.location; tags = @{ deploymentHost = $script:HostOwner }
-        identity = @{ type = 'SystemAssigned' }
-        properties = @{
-            hardwareProfile = @{ vmSize = $s.VmSize }
-            securityProfile = @{ securityType = 'TrustedLaunch'; uefiSettings = @{ secureBootEnabled = $true; vTpmEnabled = $true } }
-            networkProfile = @{ networkInterfaces = @(@{ id = $s.NicId }) }
-            osProfile = @{ linuxConfiguration = @{ disablePasswordAuthentication = $true; provisionVMAgent = $true } }
+    $desired = @{
+        addressPrefix = $s.SubnetPrefix; defaultOutboundAccess = $false; routeTable = @{ id = $s.RouteId }
+        delegations = @(@{ name = 'aca-deployment'; properties = @{ serviceName = 'Microsoft.App/environments' } })
+    }
+    $subnet = Invoke-HostArm GET $s.SubnetId '2024-05-01' -AllowMissing
+    if (-not $subnet) {
+        $null = Ensure-HostResource $s.SubnetId '2024-05-01' @{ properties = $desired } -ValidateOnly:$ValidateOnly
+        return
+    }
+    $p = $subnet.properties
+    foreach ($field in @('natGateway', 'serviceEndpoints', 'privateEndpoints')) {
+        if ($p[$field]) { throw "Deployment subnet has unexpected $field; refusing migration." }
+    }
+    Assert-HostSubset $p @{ addressPrefix = $s.SubnetPrefix; defaultOutboundAccess = $false; routeTable = @{ id = $s.RouteId } }
+    if ($p['delegations']) {
+        Assert-HostSubset $p @{ delegations = $desired.delegations }
+        if ($p['networkSecurityGroup'] -and $p.networkSecurityGroup.id -eq $s.LegacyNsgId) { throw 'Legacy VM NSG remains attached to ACA subnet.' }
+        return
+    }
+    if ($ValidateOnly) { throw 'Deployment subnet is not delegated to Microsoft.App/environments. Bootstrap first.' }
+    if (Invoke-HostArm GET $s.LegacyVmId '2024-07-01' -AllowMissing) { throw 'Legacy deployment VM exists; refusing subnet migration or VM deletion.' }
+    $nic = Invoke-HostArm GET $s.LegacyNicId '2024-05-01' -AllowMissing
+    if ($nic) {
+        Assert-HostSubset $nic @{ tags = @{ deploymentHost = $script:HostOwner } }
+        if ($nic.properties['virtualMachine'] -or $nic.properties['privateEndpoint']) { throw 'Legacy NIC is referenced by a VM/private endpoint; refusing deletion.' }
+        Assert-HostSubset $nic.properties @{
+            enableIPForwarding = $false
+            ipConfigurations = @(@{ name = 'private'; properties = @{ subnet = @{ id = $s.SubnetId } } })
+        }
+        if ($nic.properties.ipConfigurations[0].properties['publicIPAddress']) { throw 'Legacy NIC has a public IP; refusing migration.' }
+    }
+    foreach ($reference in @($p['ipConfigurations'] | Where-Object { $_ })) {
+        if (-not $reference.id.StartsWith("$($s.LegacyNicId)/ipConfigurations/", [StringComparison]::OrdinalIgnoreCase) -or -not $nic) {
+            throw 'Deployment subnet contains an unknown NIC reference; refusing migration.'
         }
     }
-    $vm = Invoke-HostArm GET $s.VmId '2024-07-01' -AllowMissing
-    if ($vm) {
-        Assert-HostSubset $vm $expected $s.VmId
-        return (Wait-HostResource $s.VmId '2024-07-01')
+    $copy = $p | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable
+    if ($p['networkSecurityGroup']) {
+        if ($p.networkSecurityGroup.id -ne $s.LegacyNsgId) { throw 'Unknown subnet NSG association; refusing to detach it.' }
+        $nsg = Invoke-HostArm GET $s.LegacyNsgId '2024-05-01'
+        Assert-HostSubset $nsg @{ tags = @{ deploymentHost = $script:HostOwner } }
+        $copy.Remove('networkSecurityGroup')
     }
-    $body = $expected | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable
-    $body.properties.storageProfile = @{
-        imageReference = @{ publisher = 'Canonical'; offer = 'ubuntu-24_04-lts'; sku = 'server'; version = 'latest' }
-        osDisk = @{ createOption = 'FromImage'; diskSizeGB = 128; managedDisk = @{ storageAccountType = 'Premium_LRS' }; deleteOption = 'Detach' }
+    if ($nic) {
+        $null = Invoke-HostArm DELETE $s.LegacyNicId '2024-05-01'
+        $deadline = [DateTime]::UtcNow.AddMinutes(5)
+        while (Invoke-HostArm GET $s.LegacyNicId '2024-05-01' -AllowMissing) {
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'Legacy unused NIC deletion did not complete.' }
+            Wait-HostDelay 10
+        }
     }
-    $body.properties.osProfile.computerName = 'ai-agent-deploy'
-    $body.properties.osProfile.adminUsername = 'deployadmin'
-    $body.properties.osProfile.linuxConfiguration.ssh = @{
-        publicKeys = @(@{ path = '/home/deployadmin/.ssh/authorized_keys'; keyData = (New-HostSshKey).Trim() })
-    }
-    $null = Invoke-HostArm PUT $s.VmId '2024-07-01' $body
-    Wait-HostResource $s.VmId '2024-07-01'
+    foreach ($field in @('provisioningState', 'ipConfigurations', 'serviceAssociationLinks', 'resourceNavigationLinks')) { $copy.Remove($field) }
+    $copy.delegations = $desired.delegations
+    $null = Invoke-HostArm PUT $s.SubnetId '2024-05-01' @{ properties = $copy } -ETag $subnet['etag']
+    $null = Wait-HostResource $s.SubnetId '2024-05-01'
 }
 
 function Get-HostRoleScopes {
@@ -682,7 +765,7 @@ function Get-HostRoleScopes {
 
 function Ensure-HostRoles {
     param([hashtable]$Settings, [string]$PrincipalId)
-    if ($PrincipalId -notmatch '^[0-9a-fA-F-]{36}$') { throw 'VM managed identity principalId is missing.' }
+    if ($PrincipalId -notmatch '^[0-9a-fA-F-]{36}$') { throw 'Deployment UAI principalId is missing.' }
     foreach ($assignment in @(Get-HostRoleScopes $Settings)) {
         $scope = $assignment.Scope
         $subscription = $scope.Split('/')[2]
@@ -714,144 +797,23 @@ function Invoke-HostDns {
     }
 }
 
-function Get-HostRemoteScript {
-    param([hashtable]$Settings, [string]$Repository, [string]$Revision, [string]$Phase, [string]$RunId)
-    if ($Repository -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*/[a-zA-Z0-9][a-zA-Z0-9_.-]*$' -or
-        $Revision -notmatch '^[0-9a-fA-F]{40}$' -or $RunId -notmatch '^[0-9a-f]{32}$' -or
-        $Phase -notin @('Full', 'Provision', 'Publish', 'Verify')) { throw 'Run requires a valid public owner/repo, full commit SHA and deployment phase.' }
-    $scopes = @(Get-HostRoleScopes $Settings | ForEach-Object { $_.Scope } | Select-Object -Unique)
-    $scopeText = ($scopes | ForEach-Object { "'$_'" }) -join ' '
-    # No token is passed to GitHub. Azure tokens remain in the VM's root-only run directory.
-    $template = @'
-#!/bin/bash
-set -Eeuo pipefail
-umask 077
-base=/var/lib/ai-agent-deployment
-mkdir -p "$base/logs" "$base/runs"
-exec 9>"$base/deployment.lock"
-flock -n 9 || { echo "Another deployment is active" >&2; exit 75; }
-run='__RUN__'
-log="$base/logs/$run.log"
-work="$base/runs/$run"
-mkdir -p "$work"
-finish() {
-  rc=$?
-  trap - EXIT
-  set +e
-  # ARM only receives a bounded, redacted tail; complete logs remain root-only on disk.
-  tail -c 12000 "$log" | sed -E \
-    -e 's/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/[REDACTED JWT]/g' \
-    -e 's/((access_token|refresh_token|client_secret|password|AccountKey|SharedAccessSignature)[=:][[:space:]]*)[^ ,;]+/\1[REDACTED]/Ig' \
-    -e 's/([?&](sig|token)=)[^&[:space:]]+/\1[REDACTED]/Ig' >&3
-  echo "Private host log: $log" >&3
-  rm -rf -- "$work"
-  exit "$rc"
-}
-touch "$log"
-exec 3>&1 4>&2
-trap finish EXIT
-exec >"$log" 2>&1
-export DEBIAN_FRONTEND=noninteractive
-export AZURE_CONFIG_DIR="$work/azure"
-export AZD_CONFIG_DIR="$work/azd"
-export GIT_TERMINAL_PROMPT=0
-missing_tools=false
-for tool in pwsh az azd git jq curl python3.12 docker dockerd; do
-  command -v "$tool" >/dev/null || missing_tools=true
-done
-if [ "$missing_tools" = true ] || ! python3.12 -c 'import ensurepip' >/dev/null 2>&1; then
-  # Ubuntu Azure images otherwise select HTTP/azure.archive mirrors not in the HTTPS allowlist.
-  for source in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
-    if [ -f "$source" ]; then
-      sed -i -E \
-        -e 's|https?://([[:alnum:]-]+\.)?archive.ubuntu.com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g' \
-        -e 's|http://security.ubuntu.com/ubuntu/?|https://security.ubuntu.com/ubuntu/|g' "$source"
-    fi
-  done
-  apt-get update
-  apt-get install -y ca-certificates curl git jq unzip python3.12 python3.12-venv nodejs npm docker.io
-  curl --fail --silent --show-error --location --retry 3 https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o "$work/microsoft.deb"
-  dpkg -i "$work/microsoft.deb"
-  apt-get update
-  apt-get install -y powershell
-  curl --fail --silent --show-error --location --retry 3 https://aka.ms/InstallAzureCLIDeb -o "$work/install-az.sh"
-  bash "$work/install-az.sh"
-  curl --fail --silent --show-error --location --retry 3 https://aka.ms/install-azd.sh -o "$work/install-azd.sh"
-  bash "$work/install-azd.sh"
-fi
-python3.12 -m venv "$work/python"
-export VIRTUAL_ENV="$work/python"
-export PATH="$VIRTUAL_ENV/bin:$PATH"
-python -c 'import sys; assert sys.version_info[:2] == (3, 12), "Deployment requires Python 3.12"'
-export DOCKER_CONFIG="$work/docker-config"
-export DOCKER_HOST=unix:///run/ai-agent-docker.sock
-mkdir -p "$DOCKER_CONFIG" "$base/docker"
-if [ -f /etc/docker/daemon.json ]; then
-  jq -e '((.hosts // []) | length) == 0' /etc/docker/daemon.json >/dev/null || {
-    echo "Unexpected Docker listener configuration; TCP daemon exposure is forbidden" >&2; exit 78;
-  }
-fi
-# This VM is dedicated to deployment. Disable the distribution socket/daemon and
-# run its private builder with one root-only Unix socket, never a TCP listener.
-systemctl disable --now docker.service docker.socket
-dockerd_path="$(command -v dockerd)"
-printf '%s\n' \
-  '[Unit]' 'Description=AI Agent private local builder' \
-  'After=network-online.target containerd.service' 'Requires=containerd.service' \
-  '[Service]' 'Type=notify' \
-  "ExecStart=$dockerd_path --host=unix:///run/ai-agent-docker.sock --group=root --data-root=$base/docker --exec-root=/run/ai-agent-docker --pidfile=/run/ai-agent-docker.pid --containerd=/run/containerd/containerd.sock" \
-  'ExecStartPost=/usr/bin/chmod 0600 /run/ai-agent-docker.sock' \
-  'TimeoutStartSec=180' 'Delegate=yes' 'KillMode=process' \
-  'LimitNOFILE=1048576' 'TasksMax=infinity' \
-  > /etc/systemd/system/ai-agent-docker.service
-systemctl daemon-reload
-systemctl restart ai-agent-docker.service
-[ "$(stat -c '%u:%g:%a' /run/ai-agent-docker.sock)" = '0:0:600' ] || {
-  echo "Private Docker socket is not root-only" >&2; exit 78;
-}
-docker info >/dev/null
-az login --identity --output none
-az account set --subscription '__SUBSCRIPTION__'
-# Assignment visibility is not token propagation: test actual ARM access with fresh MI tokens.
-ready=false
-for attempt in $(seq 1 40); do
-  ready=true
-  for scope in __SCOPES__; do
-    if ! az rest --method get --url "https://management.azure.com${scope}/providers/Microsoft.Authorization/permissions?api-version=2022-04-01" --output json >"$work/permissions.json"; then
-      ready=false; break
-    fi
-    if ! jq -e '[.value[].actions[]] | any(. == "*" or . == "Microsoft.Resources/*")' "$work/permissions.json" >/dev/null; then
-      # DNS contributor is deliberately narrower than resource-group Contributor.
-      if ! jq -e '[.value[].actions[]] | any(. == "Microsoft.Network/privateDnsZones/*")' "$work/permissions.json" >/dev/null; then ready=false; break; fi
-    fi
-    if [ "$scope" != '__DNSSCOPE__' ]; then
-      if ! jq -e 'any(.value[]; (.actions | any(. == "*" or . == "Microsoft.Authorization/roleAssignments/write" or . == "Microsoft.Authorization/roleAssignments/*")) and (.notActions | map(ascii_downcase) | all(. != "microsoft.authorization/*/write" and . != "microsoft.authorization/roleassignments/write" and . != "*")))' "$work/permissions.json" >/dev/null; then ready=false; break; fi
-    fi
-  done
-  if [ "$ready" = true ]; then break; fi
-  sleep 15
-  az account clear
-  az login --identity --output none
-  az account set --subscription '__SUBSCRIPTION__'
-done
-[ "$ready" = true ] || { echo "MI role propagation timed out" >&2; exit 77; }
-checkout="$work/checkout"
-git init "$checkout"
-git -C "$checkout" remote add origin 'https://github.com/__REPOSITORY__.git'
-git -C "$checkout" fetch --depth 1 origin '__REVISION__'
-git -C "$checkout" checkout --detach FETCH_HEAD
-[ "$(git -C "$checkout" rev-parse HEAD)" = '__REVISION__' ]
-cd "$checkout"
-pwsh -NoLogo -NoProfile -File ./ai-agent/Invoke-AiAgent.ps1 -Mode Deploy -Phase '__PHASE__' -OutputPath "$work/output"
-'@
-    $template.Replace('__RUN__', $RunId).Replace('__SUBSCRIPTION__', $Settings.Config.subscriptionId).
-        Replace('__SCOPES__', $scopeText).Replace('__DNSSCOPE__', $Settings.DnsScope).Replace('__REPOSITORY__', $Repository).
-        Replace('__REVISION__', $Revision.ToLowerInvariant()).Replace('__PHASE__', $Phase)
+function Get-HostJobContainer {
+    param([string]$Repository, [string]$Revision, [hashtable[]]$Environment)
+    # Download the pinned public bootstrap without Authorization or a token-bearing URL.
+    $url = "https://raw.githubusercontent.com/$Repository/$Revision/ai-agent/Run-AiAgentJob.sh"
+    @{
+        name = 'deployment'; image = $script:HostWorkerImage; command = @('/bin/bash')
+        args = @('-c', "set -Eeuo pipefail; umask 077; script=`"`$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error --retry 3 '$url')`"; exec /bin/bash -c `"`$script`"")
+        resources = @{ cpu = 2.0; memory = '4Gi' }; env = @($Environment)
+    }
 }
 
 function ConvertTo-HostSafeText {
     param([AllowNull()][string]$Text, [int]$Limit = 4096)
     if (-not $Text) { return '' }
+    foreach ($secret in $script:HostSensitiveValues) {
+        if ($secret) { $Text = $Text.Replace($secret, '[REDACTED]') }
+    }
     $text = $Text -replace '(?m)^\s*::', '[workflow command suppressed] '
     $text = $text -replace '\x1b\[[0-?]*[ -/]*[@-~]', ''
     $text = $text -replace '[\x00-\x08\x0b-\x1f\x7f]', ''
@@ -870,66 +832,181 @@ function Write-HostSafeOutput {
     if ($Text) { Write-Host (ConvertTo-HostSafeText $Text) }
 }
 
-function Wait-HostRunCommand {
-    param([string]$Id, [int]$TimeoutSeconds = 10800)
+function Get-HostJobBody {
+    param([hashtable]$Settings, [string]$ClientId)
+    @{
+        location = $Settings.Config.location; tags = @{ deploymentHost = $script:HostOwner }
+        identity = @{ type = 'UserAssigned'; userAssignedIdentities = @{ $Settings.IdentityId = @{} } }
+        properties = @{
+            environmentId = $Settings.EnvironmentId; workloadProfileName = 'Consumption'
+            configuration = @{
+                triggerType = 'Manual'; replicaTimeout = 10500; replicaRetryLimit = 0
+                manualTriggerConfig = @{ replicaCompletionCount = 1; parallelism = 1 }
+            }
+            template = @{ containers = @(@{
+                name = 'deployment'; image = $script:HostWorkerImage; command = @('/bin/bash')
+                args = @('-c', 'echo "Use Run with a pinned repository revision" >&2; exit 78')
+                resources = @{ cpu = 2.0; memory = '4Gi' }; env = @(@{ name = 'AZURE_CLIENT_ID'; value = $ClientId })
+            }) }
+        }
+    }
+}
+
+function Ensure-HostJobInfrastructure {
+    param([hashtable]$Settings, [switch]$ValidateOnly)
+    $s = $Settings
+    $identity = Invoke-HostArm GET $s.IdentityId '2023-01-31' -AllowMissing
+    $identityExpected = @{ location = $s.Config.location; tags = @{ deploymentHost = $script:HostOwner } }
+    if (-not $identity) {
+        if ($ValidateOnly) { throw 'Deployment UAI missing; Bootstrap first.' }
+        $null = Invoke-HostArm PUT $s.IdentityId '2023-01-31' $identityExpected
+    } else { Assert-HostSubset $identity $identityExpected }
+    $deadline = [DateTime]::UtcNow.AddMinutes(5)
+    do {
+        $identity = Invoke-HostArm GET $s.IdentityId '2023-01-31'
+        if ($identity.properties['principalId'] -match '^[0-9a-fA-F-]{36}$' -and $identity.properties['clientId'] -match '^[0-9a-fA-F-]{36}$') { break }
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Deployment UAI identifiers did not become available.' }
+        Wait-HostDelay 10
+    } while ($true)
+    $s.ManagedIdentityObjectId = $identity.properties.principalId
+    $s.ManagedIdentityClientId = $identity.properties.clientId
+    $null = Ensure-HostResource $s.EnvironmentId $script:HostAppApi @{
+        location = $s.Config.location; tags = @{ deploymentHost = $script:HostOwner }
+        properties = @{
+            publicNetworkAccess = 'Disabled'; zoneRedundant = $false
+            vnetConfiguration = @{ internal = $true; infrastructureSubnetId = $s.SubnetId }
+            workloadProfiles = @(@{ name = 'Consumption'; workloadProfileType = 'Consumption' })
+            appLogsConfiguration = @{ destination = 'none' }
+        }
+    } -ValidateOnly:$ValidateOnly
+    $body = Get-HostJobBody $s $s.ManagedIdentityClientId
+    $null = Ensure-HostResource $s.JobId $script:HostAppApi $body -ValidateOnly:$ValidateOnly
+    $job = Invoke-HostArm GET $s.JobId $script:HostAppApi
+    if ($job.identity.userAssignedIdentities.Count -ne 1 -or $job.properties.configuration['registries']) {
+        throw 'Deployment Job has unexpected identity/registry credentials; refusing operation.'
+    }
+    if (-not $ValidateOnly) { Ensure-HostRoles $s $s.ManagedIdentityObjectId }
+}
+
+function Get-HostJobExecutions {
+    param([hashtable]$Settings)
+    $response = Invoke-HostArm GET "$($Settings.JobId)/executions" $script:HostAppApi
+    for ($page = 0; $page -lt 100; $page++) {
+        if (-not $response.ContainsKey('value') -or $response['value'] -isnot [array]) { throw 'Execution listing omitted definitive status data.' }
+        foreach ($execution in $response.value) {
+            if (-not $execution['id'] -or -not $execution.id.StartsWith("$($Settings.JobId)/executions/", [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Execution listing returned an unexpected resource scope.'
+            }
+            $execution
+        }
+        if (-not $response['nextLink']) { return }
+        $uri = $null
+        if (-not [Uri]::TryCreate($response.nextLink, [UriKind]::Absolute, [ref]$uri) -or $uri.Host -ne 'management.azure.com' -or
+            $uri.AbsolutePath -ne "$($Settings.JobId)/executions") { throw 'Unexpected execution pagination URL.' }
+        $response = (Invoke-HostMemoryArm GET -Url $response.nextLink).Value
+    }
+    throw 'Execution listing exceeded bounded pagination; refusing secret cleanup.'
+}
+
+function Assert-HostNoActiveExecution {
+    param([hashtable]$Settings)
+    foreach ($execution in @(Get-HostJobExecutions $Settings)) {
+        if ($execution.properties['status'] -notin @('Succeeded', 'Failed', 'Stopped')) {
+            throw 'Deployment Job has an active or unknown execution. Serialize runs; secrets cannot be changed/removed yet.'
+        }
+    }
+}
+
+function Set-HostJobSecrets {
+    param([hashtable]$Settings, [hashtable[]]$Secrets, [string]$RemovePrefix)
+    Assert-HostNoActiveExecution $Settings
+    $job = Invoke-HostArm GET $Settings.JobId $script:HostAppApi
+    Assert-HostSubset $job @{ tags = @{ deploymentHost = $script:HostOwner }; properties = @{ environmentId = $Settings.EnvironmentId } }
+    # listSecrets returns existing values; keep them in memory so unrelated encrypted
+    # secrets survive the replacement array. GET only returns redacted secret metadata.
+    $listed = (Invoke-HostMemoryArm POST "$($Settings.JobId)/listSecrets").Value
+    if ($null -eq $listed -or -not $listed.ContainsKey('value') -or $listed['value'] -isnot [array]) { throw 'Job secret listing is incomplete; refusing replacement.' }
+    foreach ($existing in $listed.value) {
+        if ($existing -isnot [System.Collections.IDictionary] -or -not $existing['name'] -or
+            (-not $existing.Contains('value') -and -not $existing['keyVaultUrl'])) {
+            throw 'Existing Job secret values/references were not returned; refusing destructive replacement.'
+        }
+    }
+    $merged = @($listed.value | Where-Object { -not $RemovePrefix -or -not $_.name.StartsWith($RemovePrefix, [StringComparison]::Ordinal) })
+    if ($RemovePrefix -and $merged.Count -eq @($listed.value).Count -and -not $Secrets) { return }
+    foreach ($secret in @($Secrets | Where-Object { $_ })) {
+        if ($secret.name -in @($merged | ForEach-Object { $_.name })) { throw 'Per-run Job secret name conflicts; refusing overwrite.' }
+        $merged += $secret
+    }
+    $configuration = $job.properties.configuration | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable
+    $configuration.secrets = @($merged)
+    $null = Invoke-HostMemoryArm PATCH $Settings.JobId @{ properties = @{ configuration = $configuration } }
+    $null = Wait-HostResource $Settings.JobId $script:HostAppApi
+}
+
+function Clear-HostRunSecrets {
+    param([hashtable]$Settings, [string]$GitHubRunId)
+    if ($GitHubRunId -notmatch '^[1-9][0-9]{0,19}$') { throw 'Cleanup requires the exact numeric GitHubRunId.' }
+    $job = Invoke-HostArm GET $Settings.JobId $script:HostAppApi -AllowMissing
+    if (-not $job) { Write-Host 'Dedicated Job does not exist. No secret cleanup needed.'; return }
+    Set-HostJobSecrets $Settings -RemovePrefix "ato-$GitHubRunId-"
+}
+
+function Wait-HostJobExecution {
+    param([string]$Id, [int]$TimeoutSeconds = 10800, [bool]$RequireSuccess = $true)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        $resource = Invoke-HostArm GET $Id '2024-07-01' -Query '$expand=instanceView'
-        $properties = $resource.properties
-        $iv = if ($properties.ContainsKey('instanceView')) { $properties.instanceView } else { @{} }
-        if ($properties['provisioningState'] -in @('Failed', 'Canceled') -or
-            $iv['executionState'] -in @('Failed', 'TimedOut', 'Canceled') -or
-            ($properties['provisioningState'] -eq 'Succeeded' -and $iv['executionState'] -eq 'Succeeded')) {
-            Write-HostSafeOutput $iv['output']
-            Write-HostSafeOutput $iv['error']
-            if ($properties['provisioningState'] -ne 'Succeeded' -or $iv['executionState'] -ne 'Succeeded' -or
-                -not $iv.ContainsKey('exitCode') -or $null -eq $iv['exitCode'] -or $iv['exitCode'] -ne 0) {
-                throw "Managed Run Command failed: provisioningState=$($properties['provisioningState']), executionState=$($iv['executionState']), exitCode=$($iv['exitCode']). Logs remain on the dedicated VM."
-            }
-            return
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Container Apps Job execution exceeded its bounded wait.' }
+        $execution = Invoke-HostArm GET $Id $script:HostAppApi
+        $state = $execution.properties['status']
+        if ($state -in @('Succeeded', 'Failed', 'Stopped')) {
+            if ($RequireSuccess -and $state -ne 'Succeeded') { throw "Container Apps Job execution failed: status=$state (ARM provisioning success is not execution success)." }
+            return $state
         }
-        if ([DateTime]::UtcNow -ge $deadline) { throw 'Managed Run Command exceeded its bounded three-hour wait. Logs remain on the dedicated VM.' }
+        if ($state -notin @('Running', 'Processing', 'Degraded')) { throw 'Container Apps Job execution returned unknown/missing status; refusing success fallback.' }
         Wait-HostDelay 15
     } while ($true)
 }
 
-function Assert-HostVm {
-    param([hashtable]$Settings, [switch]$AllowMissing)
-    $vm = Invoke-HostArm GET $Settings.VmId '2024-07-01' -AllowMissing:$AllowMissing
-    if (-not $vm) { return $null }
-    Assert-HostSubset $vm @{
-        tags = @{ deploymentHost = $script:HostOwner }; identity = @{ type = 'SystemAssigned' }
-        properties = @{
-            networkProfile = @{ networkInterfaces = @(@{ id = $Settings.NicId }) }
-            securityProfile = @{ securityType = 'TrustedLaunch'; uefiSettings = @{ secureBootEnabled = $true; vTpmEnabled = $true } }
-        }
-    }
-    $vm
-}
-
-function Stop-HostVm {
-    param([hashtable]$Settings)
-    if (-not (Assert-HostVm $Settings -AllowMissing)) {
-        Write-Host "Dedicated VM does not exist: $($Settings.VmId). No deallocation operation needed."
-        return
-    }
-    $null = Invoke-HostAz @('vm', 'deallocate', '--ids', $Settings.VmId, '--no-wait')
-    $deadline = [DateTime]::UtcNow.AddMinutes(15)
+function Resolve-HostJobStart {
+    param([hashtable]$Settings, [hashtable]$Response)
+    $deadline = [DateTime]::UtcNow.AddMinutes(10)
     do {
-        $view = Invoke-HostArm GET "$($Settings.VmId)/instanceView" '2024-07-01'
-        if ('PowerState/deallocated' -in @($view.statuses | ForEach-Object { $_.code })) { return }
-        if ([DateTime]::UtcNow -ge $deadline) { throw 'Dedicated VM deallocation timed out.' }
-        Wait-HostDelay 10
+        if ($Response.Value -and $Response.Value['id']) {
+            $id = $Response.Value.id
+            if ($id -notmatch "^$([regex]::Escape($Settings.JobId))/executions/[a-zA-Z0-9_-]+$") { throw 'Job start returned an unexpected execution resource ID.' }
+            return $id
+        }
+        if (-not $Response.Location) { throw 'Job start did not identify its execution or asynchronous operation; no latest-execution fallback.' }
+        $uri = $null
+        if (-not [Uri]::TryCreate($Response.Location, [UriKind]::Absolute, [ref]$uri) -or
+            -not $uri.AbsolutePath.StartsWith("/subscriptions/$($Settings.Config.subscriptionId)/", [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Job start returned an out-of-subscription operation URL.'
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'Job start operation exceeded bounded ten-minute wait.' }
+        Wait-HostDelay 5
+        $location = $Response.Location
+        $Response = Invoke-HostMemoryArm GET -Url $location
+        if (-not $Response.Location) { $Response.Location = $location }
+        if ($Response.Value -and $Response.Value['status'] -in @('Failed', 'Canceled')) { throw 'Job start asynchronous operation failed.' }
     } while ($true)
 }
 
+function Invoke-HostGitHub {
+    param([string]$Method, [string]$Repository, [string]$Path, [hashtable]$Body)
+    if ($Path -notmatch '^check-runs(?:/[0-9]+)?$') { throw 'Only repository check-run API operations are permitted.' }
+    (Invoke-HostMemoryRequest $Method "https://api.github.com/repos/$Repository/$Path" $env:GH_TOKEN $Body).Value
+}
+
 function Invoke-AiAgentHost {
-    param([string]$Action, [string]$ConfigPath, [string]$Repository, [string]$Revision, [string]$Phase)
+    param([ValidateSet('Bootstrap', 'Run', 'Cleanup')][string]$Action, [string]$ConfigPath, [string]$Repository,
+        [string]$Revision, [string]$Phase = 'Provision', [string]$GitHubRunId, [hashtable]$SecretParameters = @{}, [string[]]$ArtifactHosts = @())
     $s = Get-HostSettings $ConfigPath
-    if ($Action -eq 'Deallocate') { Stop-HostVm $s; return }
+    $s.ArtifactHosts = @($ArtifactHosts | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
+    foreach ($hostName in $s.ArtifactHosts) { $null = New-HostArtifactRule $s $hostName }
+    if ($Action -eq 'Cleanup') { Clear-HostRunSecrets $s $GitHubRunId; return }
     if (-not $s.EgressApproved) { throw 'Set deploymentHost.egressApproved=true only after approving this Bootstrap scoped firewall group and private routes.' }
     if ($Action -eq 'Bootstrap') {
-        Assert-HostVmAvailability $s
         foreach ($rg in @($s.Config.resourceGroupName, $s.Config.applicationResourceGroupName, $s.Config.networking.resourceGroupName)) {
             $id = "/subscriptions/$($s.Config.subscriptionId)/resourceGroups/$rg"
             if (-not (Invoke-HostArm GET $id '2022-09-01' -AllowMissing)) {
@@ -939,52 +1016,104 @@ function Invoke-AiAgentHost {
         Ensure-HostNetwork $s
         Invoke-HostDns
         Ensure-HostPrivatePaths $s
-        try {
-            $vm = Ensure-HostVm $s
-            Ensure-HostRoles $s $vm.identity.principalId
-        } finally {
-            if (Invoke-HostArm GET $s.VmId '2024-07-01' -AllowMissing) { Stop-HostVm $s }
-        }
+        Ensure-HostJobInfrastructure $s
         @{
-            hostId = $s.VmId; managedIdentityObjectId = $vm.identity.principalId
+            hostId = $s.JobId; jobId = $s.JobId; environmentId = $s.EnvironmentId
+            managedIdentityResourceId = $s.IdentityId; managedIdentityObjectId = $s.ManagedIdentityObjectId
+            managedIdentityClientId = $s.ManagedIdentityClientId
             hubFirewallPrivateIp = $s.HubFirewallPrivateIp; existingVnetResourceId = $s.VnetId
             deploymentHostSubnetPrefix = $s.SubnetPrefix
             firewallRuleCollectionGroupId = $s.FirewallRuleCollectionGroupId
             governanceGatewayPrivateIps = $s.GovernanceGatewayPrivateIps
             governanceGatewayFqdn = $s.GovernanceGatewayFqdn
             privateDnsScope = $s.DnsScope; privateDnsZoneNames = $s.DnsZoneNames
+            artifactHosts = $s.ArtifactHosts
         } | ConvertTo-Json -Compress
         return
     }
     if ($Action -ne 'Run') { throw 'Unknown host action.' }
-    $runId = [guid]::NewGuid().ToString('N')
-    $remote = Get-HostRemoteScript $s $Repository $Revision $Phase $runId
-    $null = Assert-HostVm $s
+    if ($Repository -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*/[a-zA-Z0-9][a-zA-Z0-9_.-]*$' -or
+        $Revision -notmatch '^[0-9a-fA-F]{40}$' -or $Phase -notin @('Provision', 'Publish', 'Verify', 'Handoff') -or
+        $GitHubRunId -notmatch '^[1-9][0-9]{0,19}$') { throw 'Run requires public owner/repo, full Revision40, supported Phase and exact numeric GitHubRunId.' }
+    if (-not $env:GH_TOKEN) { throw 'Run requires ephemeral GH_TOKEN with same-repository checks:write and actions:read permissions.' }
+    $reserved = @('GH_TOKEN', 'ATO_REPOSITORY', 'ATO_REVISION', 'ATO_PHASE', 'ATO_GITHUB_RUN_ID', 'ATO_CHECK_RUN_ID', 'AZURE_CLIENT_ID', 'PATH', 'BASH_ENV', 'ENV', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONHOME')
+    foreach ($key in $SecretParameters.Keys) {
+        if ($key -isnot [string] -or $key -cnotmatch '^[A-Z][A-Z0-9_]{0,63}$' -or $key -in $reserved -or
+            $SecretParameters[$key] -isnot [string] -or -not $SecretParameters[$key]) { throw 'Invalid/reserved SecretParameters environment name or empty/nonstring secret value.' }
+    }
     Ensure-HostNetwork $s -ValidateOnly
     Ensure-HostPrivatePaths $s -ValidateOnly
-    $id = "$($s.VmId)/runCommands/ai-agent-$runId"
+    Ensure-HostJobInfrastructure $s -ValidateOnly
+    Assert-HostNoActiveExecution $s
+    $oldSensitive = $script:HostSensitiveValues
+    $script:HostSensitiveValues = @($env:GH_TOKEN) + @($SecretParameters.Values)
+    $id = $null; $check = $null; $succeeded = $false
     try {
-        $null = Invoke-HostAz @('vm', 'start', '--ids', $s.VmId, '--no-wait')
-        $deadline = [DateTime]::UtcNow.AddMinutes(15)
-        do {
-            $view = Invoke-HostArm GET "$($s.VmId)/instanceView" '2024-07-01'
-            if ('PowerState/running' -in @($view.statuses | ForEach-Object { $_.code })) { break }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'Dedicated VM start timed out.' }
-            Wait-HostDelay 10
-        } while ($true)
-        $null = Invoke-HostArm PUT $id '2024-07-01' @{
-            location = $s.Config.location
-            properties = @{ source = @{ script = $remote }; asyncExecution = $true; timeoutInSeconds = 10500 }
+        $check = Invoke-HostGitHub POST $Repository 'check-runs' @{
+            name = "Private deployment: $Phase"; head_sha = $Revision.ToLowerInvariant(); status = 'in_progress'
+            external_id = "ato-$GitHubRunId-$Phase"
+            details_url = "https://github.com/$Repository/actions/runs/$GitHubRunId"
         }
-        Wait-HostRunCommand $id
+        if ($null -eq $check -or "$($check['id'])" -notmatch '^[1-9][0-9]*$') { throw 'GitHub did not return a definitive per-phase check-run ID.' }
+        $prefix = "ato-$GitHubRunId-$([guid]::NewGuid().ToString('N').Substring(0, 8))-"
+        $secrets = @(@{ name = "${prefix}github"; value = $env:GH_TOKEN })
+        $environment = @(
+            @{ name = 'GH_TOKEN'; secretRef = "${prefix}github" },
+            @{ name = 'ATO_REPOSITORY'; value = $Repository }, @{ name = 'ATO_REVISION'; value = $Revision.ToLowerInvariant() },
+            @{ name = 'ATO_PHASE'; value = $Phase }, @{ name = 'ATO_GITHUB_RUN_ID'; value = $GitHubRunId },
+            @{ name = 'ATO_CHECK_RUN_ID'; value = "$($check.id)" }, @{ name = 'AZURE_CLIENT_ID'; value = $s.ManagedIdentityClientId }
+        )
+        $index = 0
+        foreach ($key in @($SecretParameters.Keys | Sort-Object)) {
+            $name = "${prefix}secret-$index"; $index++
+            $secrets += @{ name = $name; value = $SecretParameters[$key] }
+            $environment += @{ name = $key; secretRef = $name }
+        }
+        Set-HostJobSecrets $s $secrets
+        $container = Get-HostJobContainer $Repository $Revision.ToLowerInvariant() $environment
+        # POST is deliberately never retried: an uncertain response must not double-deploy.
+        $start = Invoke-HostMemoryArm POST "$($s.JobId)/start" @{ containers = @($container) }
+        $id = Resolve-HostJobStart $s $start
+        Write-Host "Private Job execution: $id; check-run $($check.id)."
+        $null = Wait-HostJobExecution $id
+        $succeeded = $true
+    } catch {
+        if ($check) {
+            try {
+                $details = Invoke-HostGitHub GET $Repository "check-runs/$($check.id)"
+                if ($details['output']) {
+                    Write-HostSafeOutput $details.output['summary']
+                    Write-HostSafeOutput $details.output['text']
+                }
+            } catch { Write-Warning 'Private check-run failure tail unavailable; inspect the phase check and exact Job execution.' }
+        }
+        throw
     } finally {
         try {
-            # Deleting this exact invocation cancels a still-running command and avoids the 25-command limit.
-            if (Invoke-HostArm GET $id '2024-07-01' -AllowMissing) { $null = Invoke-HostArm DELETE $id '2024-07-01' }
-        } finally { Stop-HostVm $s }
+            if ($id) {
+                $execution = Invoke-HostArm GET $id $script:HostAppApi
+                if ($execution.properties['status'] -notin @('Succeeded', 'Failed', 'Stopped')) {
+                    $null = Invoke-HostMemoryArm POST "$id/stop"
+                    $null = Wait-HostJobExecution $id -TimeoutSeconds 300 -RequireSuccess $false
+                }
+            }
+            Clear-HostRunSecrets $s $GitHubRunId
+        } catch {
+            $succeeded = $false
+            throw
+        } finally {
+            try {
+                if ($check) {
+                    $null = Invoke-HostGitHub PATCH $Repository "check-runs/$($check.id)" @{
+                        status = 'completed'; conclusion = if ($succeeded) { 'success' } else { 'failure' }
+                    }
+                }
+            } finally { $script:HostSensitiveValues = $oldSensitive }
+        }
     }
+    @{ jobId = $s.JobId; executionId = $id; checkRunId = $check.id; status = 'Succeeded' } | ConvertTo-Json -Compress
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-AiAgentHost $Action $ConfigPath $Repository $Revision $Phase
+    Invoke-AiAgentHost $Action $ConfigPath $Repository $Revision $Phase $GitHubRunId $SecretParameters $ArtifactHosts
 }

@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   actions: read
+  checks: write
   id-token: write
 
 concurrency:
@@ -13,9 +14,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build-images:
+    name: Build pinned images without private Azure access
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and checksum manifest-pinned GovHub and UI images
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'Build approved scenario from main only.' }
+          ./ai-agent/Invoke-AiAgent.ps1 -Mode Build -OutputPath (Join-Path $env:RUNNER_TEMP 'ai-agent')
+      - name: Retain same-run image transport for one day
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-agent-images-${{ github.sha }}
+          path: ${{ runner.temp }}/ai-agent/images/*
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
   deploy:
     name: Deploy private agent (approval required)
     runs-on: windows-latest
+    needs: build-images
     environment: demo
     timeout-minutes: 360
     defaults:
@@ -54,7 +85,7 @@ jobs:
           if ($config.authentication.tenantId -ne $env:AZURE_TENANT_ID) { throw 'OIDC and UI tenant differ.' }
           "subscription-id=$($config.subscriptionId)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Test private-host adapter
+      - name: Test private Container Apps Job adapter
         run: .\ai-agent\tests\Test-AiAgentHost.ps1
 
       - name: Install test Python
@@ -66,7 +97,7 @@ jobs:
         run: |
           python -m pip install -r .\ai-agent\tests\requirements.txt
           if ($LASTEXITCODE -ne 0) { throw 'Pinned test dependency installation failed.' }
-          python -m unittest discover -s .\ai-agent\tests -p test_gateway.py -v
+          python -m unittest discover -s .\ai-agent\tests -p 'test_*.py' -v
           if ($LASTEXITCODE -ne 0) { throw 'GovHub runtime adapter tests failed.' }
 
       - name: Configure pinned upstream outside the scenario repository
@@ -100,7 +131,7 @@ jobs:
 
       - name: Register workload resource providers
         run: |
-          foreach ($namespace in 'Microsoft.Compute', 'Microsoft.Network', 'Microsoft.ManagedIdentity',
+          foreach ($namespace in 'Microsoft.Network', 'Microsoft.ManagedIdentity',
               'Microsoft.CognitiveServices', 'Microsoft.KeyVault', 'Microsoft.AppConfiguration',
               'Microsoft.ContainerRegistry', 'Microsoft.App', 'Microsoft.Storage',
               'Microsoft.Insights', 'Microsoft.OperationalInsights', 'Microsoft.Monitor') {
@@ -108,25 +139,35 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Resource provider registration failed: $namespace" }
           }
 
-      - name: Bootstrap private host, platform DNS, peering and scoped firewall routing
-        id: bootstrap
-        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Bootstrap
+      - name: Discover exact GitHub artifact storage host without exposing its signed URL
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $hostName = python .\ai-agent\Agent-Images.py destination --repository $env:GITHUB_REPOSITORY --run-id $env:GITHUB_RUN_ID --revision $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Same-run image artifact destination validation failed.' }
+          "host=$hostName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Provision native infrastructure from the private host
-        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -Phase Provision
+      - name: Bootstrap private Container Apps Job, DNS, peering and scoped firewall routing
+        id: bootstrap
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Bootstrap -ArtifactHosts @('${{ steps.artifact.outputs.host }}')
+
+      - name: Provision native infrastructure from the private Container Apps Job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -GitHubRunId $env:GITHUB_RUN_ID -Phase Provision
 
       - name: Deploy Agent-specific GovHub product into the private Agent vault
         run: .\ai-agent\Invoke-AiAgent.ps1 -Mode Governance -OutputPath (Join-Path $env:RUNNER_TEMP 'ai-agent')
 
       - name: Reconcile private routing and exact registry egress after provisioning
-        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Bootstrap
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Bootstrap -ArtifactHosts @('${{ steps.artifact.outputs.host }}')
 
-      - name: Publish the gateway-routed hosted agent and authenticated private UI
-        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -Phase Publish
+      - name: Import verified images privately, publish and verify actual GovHub response and UI denial
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -GitHubRunId $env:GITHUB_RUN_ID -Phase Publish
 
-      - name: Verify private services, actual GovHub response and signed-out UI denial
-        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -Phase Verify
-
-      - name: Deallocate only the dedicated private deployment host
+      - name: Stop owned executions and remove ephemeral deployment Job secrets
         if: ${{ always() && steps.bootstrap.outcome != 'skipped' && steps.login.outcome == 'success' }}
-        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Deallocate
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Cleanup -GitHubRunId $env:GITHUB_RUN_ID

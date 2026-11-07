@@ -27,7 +27,8 @@
   },
   "deploymentHost": {
     "egressApproved": true,
-    "buildMode": "local"
+    "type": "container-app-job",
+    "buildMode": "workflow-artifact"
   },
   "networking": {
     "resourceGroupName": "rg-ai-agent-network-ita",

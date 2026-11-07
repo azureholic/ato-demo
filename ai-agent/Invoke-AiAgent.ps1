@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Validate', 'Prepare', 'Deploy', 'Governance')]
+    [ValidateSet('Validate', 'Prepare', 'Build', 'Deploy', 'Governance')]
     [string] $Mode = 'Validate',
     [ValidateSet('Full', 'Provision', 'Publish', 'Verify')]
     [string] $Phase = 'Full',
@@ -116,8 +116,8 @@ function Set-ScenarioEnvironment {
         DEPLOY_ACR_TASK_AGENT_POOL = 'false'
         DEPLOY_DEVOPS_BUILD_AGENTS_SUBNET = 'false'
         BUILD_MODE = 'local'
-        USE_DOCKER = 'true'
-        DOCKER_HOST = 'unix:///run/ai-agent-docker.sock'
+        USE_DOCKER = 'false'
+        ATO_ADAPTER_ROOT = $PSScriptRoot
         HOSTED_AGENT_STARTUP_COMMAND = 'python -m native.hosted'
         DEPLOY_INGESTION_CONTAINER_APP = 'false'
         NATIVE_TOOL_SECRET_NAMES = (ConvertTo-Json -InputObject @($config.governance.secretName) -Compress)
@@ -217,44 +217,82 @@ function Set-GovernanceContract {
     Write-Host 'Agent-specific model product deployed; subscription key stored directly in the private Agent vault.'
 }
 
-function Set-PrivateHostedImage {
-    param([string] $Checkout, [hashtable] $Environment, [hashtable] $Previous)
-    if ($Environment.ContainsKey('HOSTED_AGENT_IMAGE_VERSION') -and $Previous.ContainsKey('ATO_GOVHUB_ADAPTER_HASH') -and
-        $Environment.HOSTED_AGENT_IMAGE_VERSION -match '^sha256:[a-f0-9]{64}$' -and
-        $Previous.ATO_GOVHUB_ADAPTER_HASH -eq $env:ATO_GOVHUB_ADAPTER_HASH) {
-        Write-Host 'Reusing the validated adapter/configuration-specific immutable hosted image.'
-        return
-    }
+function Build-WorkflowImages {
+    param([string] $Checkout)
     $manifest = Get-Content (Join-Path $Checkout 'manifest.json') -Raw | ConvertFrom-Json
-    $components = @($manifest.components | Where-Object name -eq 'agent-app-orchestrator')
-    if ($components.Count -ne 1 -or $components[0].commit -ne '666d39862590cfb165097ee55737a1ef66fd2afc') {
-        throw 'Native runtime manifest pin changed; do not publish an untested image.'
+    $directory = Join-Path $OutputPath 'images'
+    $null = New-Item $directory -ItemType Directory -Force
+    $images = @()
+    foreach ($name in 'agent-app-orchestrator', 'agent-app-ui') {
+        $components = @($manifest.components | Where-Object name -eq $name)
+        $expected = if ($name -eq 'agent-app-orchestrator') { '666d39862590cfb165097ee55737a1ef66fd2afc' } else { '8a45595aa321d8841e7a4555d542b890beebf1b0' }
+        if ($components.Count -ne 1 -or $components[0].commit -ne $expected) {
+            throw "Immutable component manifest changed: $name"
+        }
+        $component = $components[0]
+        $source = Get-PinnedCheckout $component.repo $component.commit (Join-Path $OutputPath $name)
+        if ($name -eq 'agent-app-orchestrator') {
+            $null = Invoke-Tool python @((Join-Path $PSScriptRoot 'Patch-AiAgent.py'), 'runtime', $source)
+        }
+        $tag = "ato-$($component.commit.Substring(0, 12))-$env:ATO_GOVHUB_ADAPTER_HASH"
+        $arguments = @('build', '--platform', 'linux/amd64', '--label', "ato.configuration=$env:ATO_GOVHUB_ADAPTER_HASH", '--tag', "${name}:$tag")
+        if ($name -eq 'agent-app-orchestrator') { $arguments += @('--target', 'hosted') }
+        $null = Invoke-Tool docker ($arguments + @($source))
+        $file = "$name.tar"
+        $null = Invoke-Tool docker @('save', '--output', (Join-Path $directory $file), "${name}:$tag")
+        $images += @{ name = $name; sourceCommit = $component.commit; tag = $tag; file = $file; sha256 = (Get-FileHash (Join-Path $directory $file) -Algorithm SHA256).Hash.ToLowerInvariant() }
     }
-    $component = $components[0]
-    $source = Get-PinnedCheckout $component.repo $component.commit (Join-Path $OutputPath 'orchestrator')
-    $null = Invoke-Tool python @((Join-Path $PSScriptRoot 'Patch-AiAgent.py'), 'runtime', $source)
+    $revision = Invoke-Tool git @('-C', (Split-Path $PSScriptRoot), 'rev-parse', 'HEAD')
+    @{ schemaVersion = 1; revision = $revision; configurationHash = $env:ATO_GOVHUB_ADAPTER_HASH; components = $images } |
+        ConvertTo-Json -Depth 10 | Set-Content (Join-Path $directory 'manifest.json') -Encoding utf8NoBOM
+    Write-Host 'Pinned container images exported as checksummed workflow artifacts; no private registry access from the hosted builder.'
+}
+
+function Set-WorkflowImages {
+    param([hashtable] $Environment)
+    if (-not $env:ATO_IMAGE_ARTIFACT_PATH -or -not $env:ATO_REVISION) {
+        throw 'Publication requires the same-run immutable workflow image artifacts.'
+    }
+    $manifest = (Invoke-Tool python @((Join-Path $PSScriptRoot 'Agent-Images.py'), 'verify',
+        '--directory', $env:ATO_IMAGE_ARTIFACT_PATH, '--revision', $env:ATO_REVISION,
+        '--configuration-hash', $env:ATO_GOVHUB_ADAPTER_HASH)) | ConvertFrom-Json
     $endpoint = $Environment.AZURE_CONTAINER_REGISTRY_ENDPOINT.TrimEnd('/')
     if ($endpoint -notmatch '^[a-z0-9]+\.azurecr\.io$') { throw 'Provisioned private registry endpoint is invalid.' }
     $registry = $endpoint.Split('.')[0]
-    $imageName = $component.name
-    $tag = "ato-$($component.commit.Substring(0, 12))-$env:ATO_GOVHUB_ADAPTER_HASH"
-    $image = "$endpoint/$($imageName):$tag"
-    $null = Invoke-Tool az @('acr', 'login', '--name', $registry, '--only-show-errors')
-    $null = Invoke-Tool docker @('build', '--platform', 'linux/amd64', '--target', 'hosted',
-        '--label', "ato.configuration=$env:ATO_GOVHUB_ADAPTER_HASH", '--tag', $image, $source)
-    $null = Invoke-Tool docker @('push', $image)
-    $digest = Invoke-Tool az @('acr', 'repository', 'show', '--name', $registry,
-        '--image', "$($imageName):$tag", '--query', 'digest', '-o', 'tsv')
-    if ($digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Private image push did not yield an immutable digest.' }
-    $startupHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
-        [Text.Encoding]::UTF8.GetBytes('python -m native.hosted'))).ToLowerInvariant()
-    foreach ($entry in @{
-        HOSTED_AGENT_IMAGE = $imageName
-        HOSTED_AGENT_IMAGE_VERSION = $digest
-        HOSTED_AGENT_IMAGE_SOURCE_COMMIT = $component.commit
-        HOSTED_AGENT_IMAGE_STARTUP_COMMAND_SHA256 = $startupHash
-    }.GetEnumerator()) { $null = Invoke-Tool azd @('env', 'set', $entry.Key, $entry.Value) }
-    Write-Host "Private manifest-pinned, gateway-adapted hosted image ready: $digest"
+    $directory = "/dev/shm/ai-agent-acr-$([guid]::NewGuid().ToString('N'))"
+    $null = New-Item $directory -ItemType Directory
+    $auth = Join-Path $directory 'auth.json'
+    try {
+        $loginToken = Invoke-Tool az @('acr', 'login', '--name', $registry, '--expose-token', '--query', 'accessToken', '-o', 'tsv', '--only-show-errors')
+        $loginToken | & skopeo login --authfile $auth --username 00000000-0000-0000-0000-000000000000 --password-stdin $endpoint
+        if ($LASTEXITCODE -ne 0) { throw 'Private managed-identity registry login failed.' }
+        $loginToken = $null
+        foreach ($component in $manifest.components) {
+            $imageName = $component.name
+            $image = "$endpoint/${imageName}:$($component.tag)"
+            $archive = Join-Path $env:ATO_IMAGE_ARTIFACT_PATH $component.file
+            $null = Invoke-Tool skopeo @('copy', '--authfile', $auth, '--format', 'v2s2', "docker-archive:$archive", "docker://$image")
+            $digest = Invoke-Tool az @('acr', 'repository', 'show', '--name', $registry,
+                '--image', "${imageName}:$($component.tag)", '--query', 'digest', '-o', 'tsv')
+            if ($digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Private artifact import did not yield an immutable digest.' }
+            if ($imageName -eq 'agent-app-ui') {
+                $null = Invoke-Tool azd @('env', 'set', 'ATO_UI_IMAGE', "$endpoint/$imageName@$digest")
+            } else {
+                $startupHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                    [Text.Encoding]::UTF8.GetBytes('python -m native.hosted'))).ToLowerInvariant()
+                foreach ($entry in @{
+                    HOSTED_AGENT_IMAGE = $imageName
+                    HOSTED_AGENT_IMAGE_VERSION = $digest
+                    HOSTED_AGENT_IMAGE_SOURCE_COMMIT = $component.sourceCommit
+                    HOSTED_AGENT_IMAGE_STARTUP_COMMAND_SHA256 = $startupHash
+                }.GetEnumerator()) { $null = Invoke-Tool azd @('env', 'set', $entry.Key, $entry.Value) }
+            }
+            Write-Host "Verified private image imported: $imageName@$digest"
+        }
+    } finally {
+        $loginToken = $null
+        Remove-Item -LiteralPath $directory -Recurse -Force
+    }
 }
 
 $ConfigPath = (Resolve-Path $ConfigPath).Path
@@ -281,8 +319,8 @@ if ($config.authentication.hostedAgentAuthMode -ne 'user_delegated' -or
 if ($config.governance.tokensPerMinute -le 0 -or $config.governance.monthlyTokenQuota -le 0) {
     throw 'GovHub access contract requires explicit positive token limits.'
 }
-if ($config.deploymentHost.buildMode -ne 'local') {
-    throw 'Italy North has no ACR Task agent-pool availability; use local builds on the private host, not public remote builds.'
+if ($config.deploymentHost.buildMode -ne 'workflow-artifact' -or $config.deploymentHost.type -ne 'container-app-job') {
+    throw 'Use the private Container Apps Job with checked workflow image artifacts; no private Docker or public ACR build fallback.'
 }
 if ($Mode -eq 'Validate') {
     Write-Host 'Agent scenario validated: pinned template, Italy, isolated spoke, central DNS, delegated hosting, GovHub-only inference.'
@@ -304,10 +342,9 @@ if ($Mode -eq 'Prepare') {
     Write-Host "Pinned native template configured outside the repository: $checkout"
     return
 }
+if ($Mode -eq 'Build') { Build-WorkflowImages $checkout; return }
 
 Push-Location $checkout
-$dockerState = $null
-$previousDockerConfig = $env:DOCKER_CONFIG
 try {
     $pythonProbe = & python -c 'import azure.identity; import azure.appconfiguration; import azure.mgmt.appcontainers; import azure.ai.projects; import jsonschema; import yaml' 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -339,6 +376,9 @@ try {
         $null = Invoke-Tool azd @('env', 'set', 'HOSTED_AGENT_IMAGE_VERSION', '')
     }
     foreach ($entry in $values.GetEnumerator()) { $null = Invoke-Tool azd @('env', 'set', $entry.Key, [string]$entry.Value) }
+    if ($Phase -in 'Publish', 'Verify') {
+        $null = Invoke-Tool azd @('env', 'refresh', '--no-prompt')
+    }
     if ($Phase -in 'Full', 'Provision') {
         $null = Invoke-Tool azd @('provision', '--no-prompt')
     }
@@ -354,9 +394,6 @@ try {
                 throw "Required private-vault secret has expired: $name. Rotate it before publishing."
             }
         }
-        $dockerState = "/run/ai-agent-docker-$([guid]::NewGuid().ToString('N'))"
-        $null = New-Item $dockerState -ItemType Directory
-        $env:DOCKER_CONFIG = $dockerState
         $publishedEnvironment = (Invoke-Tool azd @('env', 'get-values', '-o', 'json')) | ConvertFrom-Json -AsHashtable
         foreach ($name in 'APP_CONFIG_ENDPOINT', 'AZURE_AI_PROJECT_ENDPOINT', 'AZURE_CONTAINER_REGISTRY_ENDPOINT') {
             if (-not $publishedEnvironment.ContainsKey($name) -or -not $publishedEnvironment[$name]) {
@@ -369,7 +406,7 @@ try {
             '--auth-mode', 'login', '--label', 'agent-lz', '--key', 'CHAINLIT_URL', '--value', $origin,
             '--yes', '--only-show-errors', '-o', 'none')
         $null = Invoke-Tool python @('-m', 'config.deployment.private_network', '--stage', 'pre-deploy')
-        Set-PrivateHostedImage $checkout $publishedEnvironment $existing
+        Set-WorkflowImages $publishedEnvironment
         $null = Invoke-Tool azd @('deploy', '--no-prompt')
     }
     if ($Phase -in 'Full', 'Verify') {
@@ -406,9 +443,5 @@ try {
     }
 }
 finally {
-    $env:DOCKER_CONFIG = $previousDockerConfig
-    if ($dockerState -and (Test-Path -LiteralPath $dockerState)) {
-        Remove-Item -LiteralPath $dockerState -Recurse -Force
-    }
     Pop-Location
 }
