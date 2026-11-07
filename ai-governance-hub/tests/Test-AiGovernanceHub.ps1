@@ -19,7 +19,7 @@ function git {
     $global:LASTEXITCODE = 0
     if ($args[0] -eq 'clone') {
         $path = $args[-1]
-        foreach ($file in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'bicep\infra\modules\apim\apim.bicep', 'src\usage-ingestion-logicapp\package.json') {
+        foreach ($file in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'bicep\infra\modules\apim\apim.bicep', 'bicep\infra\modules\apim\universal-llm-api\AIFoundryOpenAI.json', 'src\usage-ingestion-logicapp\package.json') {
             $destination = Join-Path $path $file
             New-Item (Split-Path $destination -Parent) -ItemType Directory -Force | Out-Null
             if ($file -in 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep') {
@@ -31,6 +31,19 @@ function git {
                 if ($state.Failure -eq 'changed-logger-expression') { $source = $source.Replace('eventHubPIIEndpoint', 'newEndpoint') }
                 if ($state.Failure -eq 'duplicate-logger-expression') { $source += "`nendpointAddress: replace(eventHubEndpoint, 'https://', '')" }
                 Set-Content $destination $source
+            } elseif ($file -eq 'bicep\infra\modules\apim\universal-llm-api\AIFoundryOpenAI.json') {
+                $pathParameter = @{ name = 'deployment-id'; in = 'path'; required = $true; schema = @{ type = ''; enum = @('') } }
+                $apiFixture = @{
+                    paths = @{
+                        '/deployments/{deployment-id}' = @{
+                            get = @{ operationId = 'deployment-by-name'; parameters = @($pathParameter); responses = @{ '200' = @{ description = 'Deployment details' } } }
+                        }
+                    }
+                }
+                if ($state.Failure -eq 'changed-openai-schema') { $pathParameter.schema.type = 'string' }
+                if ($state.Failure -eq 'duplicate-openai-parameter') { $apiFixture.paths['/deployments/{deployment-id}'].get.parameters += $pathParameter }
+                if ($state.Failure -eq 'missing-openai-operation') { $apiFixture.paths['/deployments/{deployment-id}'].Remove('get') }
+                $apiFixture | ConvertTo-Json -Depth 15 | Set-Content $destination
             } else {
                 Set-Content $destination '{}'
             }
@@ -162,6 +175,10 @@ try {
     foreach ($endpoint in 'eventHubEndpoint', 'eventHubPIIEndpoint') {
         Assert ($loggers.Contains("endpointAddress: split(split(split($endpoint, '://')[1], '/')[0], ':')[0]")) 'Both Event Hubs loggers must use canonical hostnames, not URLs with port/path suffixes.'
     }
+    $apiDefinition = Get-Content (Join-Path $testRoot 'validate\bicep\infra\modules\apim\universal-llm-api\AIFoundryOpenAI.json') -Raw | ConvertFrom-Json -AsHashtable
+    $deploymentGet = $apiDefinition.paths['/deployments/{deployment-id}'].get
+    Assert ($deploymentGet.parameters[0].schema.type -ceq 'string' -and -not $deploymentGet.parameters[0].schema.Contains('enum')) 'Deployment IDs must be strings without an empty-only enum.'
+    Assert ($deploymentGet.operationId -ceq 'deployment-by-name' -and $deploymentGet.responses['200'].description -ceq 'Deployment details') 'The schema repair must preserve operation IDs and unrelated API definitions.'
 
     Invoke-Case -Name 'network' -Mode Network
     Assert (@($state.Calls | Where-Object { $_ -like 'azd *' }).Count -eq 0) 'Network-only mode must not deploy GovHub services.'
@@ -200,6 +217,10 @@ try {
     foreach ($failure in 'changed-logger-expression', 'duplicate-logger-expression') {
         Invoke-Case -Name $failure -Failure $failure -ExpectedError 'Unexpected upstream Event Hubs logger expression'
         Assert (@($state.Calls | Where-Object { $_ -like 'az *' -or $_ -like 'azd *' }).Count -eq 0) 'Logger expression drift must stop before compilation or Azure changes.'
+    }
+    foreach ($failure in 'changed-openai-schema', 'duplicate-openai-parameter', 'missing-openai-operation') {
+        Invoke-Case -Name $failure -Failure $failure -ExpectedError 'Unexpected upstream OpenAI deployment parameter schema'
+        Assert (@($state.Calls | Where-Object { $_ -like 'az *' -or $_ -like 'azd *' }).Count -eq 0) 'API schema drift must stop before compilation or Azure changes.'
     }
     Invoke-Case -Name 'unpinned' -ExpectedError 'full lowercase Git commit SHA'
     Assert ($state.Calls.Count -eq 0) 'An unpinned revision must fail before cloning.'

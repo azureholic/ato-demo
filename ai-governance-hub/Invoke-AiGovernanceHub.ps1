@@ -60,7 +60,7 @@ if ($revision -cne $config.upstreamRevision) {
     throw "Upstream checkout does not match $($config.upstreamRevision)."
 }
 $infraPath = Join-Path $OutputPath 'bicep\infra'
-foreach ($relativePath in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'bicep\infra\modules\apim\apim.bicep', 'src\usage-ingestion-logicapp\package.json') {
+foreach ($relativePath in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'bicep\infra\modules\apim\apim.bicep', 'bicep\infra\modules\apim\universal-llm-api\AIFoundryOpenAI.json', 'src\usage-ingestion-logicapp\package.json') {
     if (-not (Test-Path (Join-Path $OutputPath $relativePath) -PathType Leaf)) {
         throw "Pinned upstream is missing $relativePath; review its deployment contract."
     }
@@ -77,6 +77,32 @@ foreach ($endpoint in 'eventHubEndpoint', 'eventHubPIIEndpoint') {
     $apimSource = $apimSource.Replace($original, $canonical)
 }
 Set-Content $apimPath $apimSource -NoNewline
+
+$definitionPath = Join-Path $infraPath 'modules\apim\universal-llm-api\AIFoundryOpenAI.json'
+$definition = Get-Content $definitionPath -Raw | ConvertFrom-Json -AsHashtable
+$paths = $definition['paths']
+if ($paths -isnot [Collections.IDictionary] -or
+    $paths['/deployments/{deployment-id}'] -isnot [Collections.IDictionary] -or
+    $paths['/deployments/{deployment-id}']['get'] -isnot [Collections.IDictionary]) {
+    throw 'Unexpected upstream OpenAI deployment parameter schema; review the API definition before deploying.'
+}
+$deploymentGet = $paths['/deployments/{deployment-id}']['get']
+$pathParameters = @($deploymentGet['parameters'] | Where-Object {
+    $_['name'] -ceq 'deployment-id' -and $_['in'] -ceq 'path' -and $_['required'] -eq $true
+})
+if ($pathParameters.Count -ne 1 -or $deploymentGet['operationId'] -cne 'deployment-by-name') {
+    throw 'Unexpected upstream OpenAI deployment parameter schema; review the API definition before deploying.'
+}
+$parameterSchema = $pathParameters[0]['schema']
+if ($parameterSchema -isnot [Collections.IDictionary] -or
+    $parameterSchema['type'] -isnot [string] -or $parameterSchema['type'] -cne '' -or
+    $parameterSchema['enum'] -isnot [array] -or $parameterSchema['enum'].Count -ne 1 -or
+    $parameterSchema['enum'][0] -cne '') {
+    throw 'Unexpected upstream OpenAI deployment parameter schema; review the API definition before deploying.'
+}
+$parameterSchema['type'] = 'string'
+$parameterSchema.Remove('enum')
+$definition | ConvertTo-Json -Depth 100 -WarningAction Stop | Set-Content $definitionPath
 
 if ($config.location -eq 'italynorth') {
     $allowedLocations = "@allowed([ 'uaenorth', 'southafricanorth', 'westeurope', 'southcentralus', 'australiaeast', 'canadaeast', 'eastus', 'eastus2', 'francecentral', 'japaneast', 'northcentralus', 'swedencentral', 'switzerlandnorth', 'uksouth' ])"

@@ -144,6 +144,14 @@ Azure-cloud suffix and leaving managed identity credentials and RBAC unchanged.
 Each original expression must match exactly once or the run stops for review
 before deployment. This is not a DNS, peering or provider-registration workaround.
 
+The pinned legacy OpenAI API definition also has an invalid schema on the
+`GET /deployments/{deployment-id}` path parameter: an empty `type` and an enum
+containing only an empty string. The adapter corrects that one schema to
+`type: string` without the enum, on the runner only. It preserves the operation
+ID, other API definitions and OpenAPI version. The original parameter and
+invalid schema must match exactly or deployment stops for upstream review.
+See [TODO.md](TODO.md) for the upstream contribution details.
+
 ## Run from GitHub
 
 1. Review the configuration, costs, provider registration and quotas. Changing
