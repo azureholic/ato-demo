@@ -17,6 +17,14 @@
     "storageFile": "privatelink.file.core.windows.net",
     "storageTable": "privatelink.table.core.windows.net",
     "storageQueue": "privatelink.queue.core.windows.net",
-    "apimGateway": "privatelink.azure-api.net"
+    "apimGateway": "privatelink.azure-api.net",
+    "appConfiguration": "privatelink.azconfig.io",
+    "containerAppsItalyNorth": "privatelink.italynorth.azurecontainerapps.io",
+    "containerRegistry": "privatelink.azurecr.io",
+    "azureMonitor": "privatelink.monitor.azure.com",
+    "logAnalyticsOms": "privatelink.oms.opinsights.azure.com",
+    "logAnalyticsOds": "privatelink.ods.opinsights.azure.com",
+    "azureAutomation": "privatelink.agentsvc.azure.automation.net",
+    "applicationInsights": "privatelink.applicationinsights.io"
   }
 }

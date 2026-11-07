@@ -6,28 +6,49 @@ Scenario configuration for the [Agent Landing Zone full-stack deployment](https:
 
 The requested [AI Landing Zones repository](https://github.com/Azure/AI-Landing-Zones) contains the documentation. The deployable template is [Azure/agent-landing-zone](https://github.com/Azure/agent-landing-zone), pinned in [deployment.json](config/deployment.json). Its manifest also pins infrastructure and application components. Clone those sources on the deployment runner; do not vendor them here.
 
-The scenario uses Italy North and the GovHub subscription, with separate Foundry, application and network resource groups. The proposed spoke address space is `10.180.0.0/21`, separate from the existing hub and GovHub networks. Provisioning must create both peering directions to the platform hub and reuse platform-owned private DNS zones, with direct links to this spoke. Peering alone does not provide private DNS or controlled hub egress.
+The scenario uses Italy North and the GovHub subscription, with separate Foundry, application and network resource groups. Its spoke address space is `10.180.0.0/21`, separate from the existing hub and GovHub networks. Bootstrap creates both hub peerings and links platform-owned private DNS zones. Private GovHub traffic uses a source-scoped HTTPS application rule on the hub firewall: its SNAT preserves flow symmetry without changing GovHub subnet policies or return routing. Peering alone is not transitive.
 
 GovHub and DNS configuration remain authoritative in [ai-governance-hub](../ai-governance-hub/config/deployment.json) and [platform-alz](../platform-alz/config/private-dns.json), respectively.
 
-## Deployment prerequisites
+## Deploy
 
-**Not deployed: this folder currently contains scenario configuration only. No deployment workflow or runtime adapter has been implemented yet.**
+Run [Deploy AI Agent Landing Zone](../.github/workflows/ai-agent-deploy.yml) from `main`, using the normal `demo` approval gate and existing OIDC identity. Sources are cloned at immutable pins, outside this repository.
 
-- **UI authentication:** the single-tenant `ai-agent-demo-ui` registration is created. Its tenant/client IDs and exposed API scope are recorded in [deployment.json](config/deployment.json). It issues version-2 UI access tokens and has administrator consent for exactly two delegated `user_impersonation` permissions: its own UI API and the Foundry resource (`https://ai.azure.com`). No Microsoft Graph or other application permissions were assigned. Retain upstream's `user_delegated` mode; consent does not grant Foundry caller RBAC or bypass UI admission.
-- **GovHub model routing:** the pinned native orchestrator constructs `FoundryChatClient` using its Foundry project endpoint. It does not expose an APIM model-endpoint/subscription-key setting. Adding a gateway URL alone will not route model calls through GovHub. A runner-only integration adapter is needed, including an authenticated GovHub access contract and a verified compatible model client. Do not substitute the gateway URL for the Foundry project endpoint or silently fall back to direct inference.
-- **Private deployment runner:** the repository currently has no self-hosted runners. Private App Configuration, Key Vault, Foundry and registry operations need a runner with network access and private DNS resolution. A private ACR Tasks pool only connects image builds; it does not connect a GitHub-hosted deployment runner. Keep network isolation enabled.
+1. Validate configuration, real SDK protocol tests and the complete pinned Bicep.
+2. Bootstrap an owned private Ubuntu VM, hub routing, source-scoped package egress and central DNS. There is no public VM address, inbound administration port, self-hosted-runner registration or persistent GitHub token.
+3. Provision upstream infrastructure through Azure managed Run Command using the VM's system-assigned identity.
+4. Deploy upstream's Agent-specific GovHub product/subscription. Only the configured model and OpenAI API are granted, with explicit token limits. ARM writes the subscription key directly into the private Agent vault; keys are not workflow outputs.
+5. Refresh exact registry routing/egress, build locally on the private VM, publish the hosted agent and private UI, and verify effective configuration, private DNS/TLS, a completed GovHub response and signed-out UI denial.
+6. Deallocate only the owned deployment VM, including failure paths. Resource groups, disks, agent services and build resources are retained and can still incur costs.
 
-Italy North is listed in the [Foundry hosted-agent region availability](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agents#region-availability). Actual subscription quota and allocation capacity still require deployment preflight.
+The initial scenario is explicitly conversational-only: no local model deployments, RAG, MCP, ingestion, chat-history database or private attachments. These are configuration choices made before deployment, not error-recovery fallbacks. Agent hosting keeps its own Foundry project; all application model inference uses GovHub.
 
-Once these prerequisites are resolved, deployment must use the normal `demo` approval gate and verify provisioning, application publication, both peerings, private DNS and an actual model call through GovHub before reporting success.
+Italy North is listed in [hosted-agent region availability](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agents#region-availability); allocation still requires upstream preflight. The UI stays private and needs connectivity to the landing-zone network.
+
+Italy North is not listed for `Microsoft.ContainerRegistry/registries/agentPools`. `BUILD_MODE=local` therefore uses Docker on the private VM and the private Italy registry, not public ACR Task workers. The template's supported immutable image override receives the adapted native `hosted` Docker target; no build-pool region change or network relaxation is needed.
+
+## Small runner-only adapters
+
+[Invoke-AiAgent.ps1](Invoke-AiAgent.ps1) clones/configures the template and runs its native lifecycle. [Invoke-AiAgentHost.ps1](Invoke-AiAgentHost.ps1) handles the private deployment host and strict Run Command exit-code verification.
+
+The upstream orchestrator has no configurable APIM inference client. [Patch-AiAgent.py](Patch-AiAgent.py) therefore patches only the pinned runner checkouts:
+
+- Native configuration requires a gateway endpoint/API version and a secret URI bound to the provisioned vault.
+- [govhub.py](govhub.py) uses the SDK's Azure Responses client against `/openai/responses`, with the product's `api-key` and `api-version`. Missing/invalid settings, secrets or private gateway DNS fail closed; there is no direct Foundry or public inference fallback.
+- The actual manifest-pinned Docker build source is adapted before the local build. Its adapter/configuration fingerprint is included in the image label and invalidates previous image selection. Registry login credentials use an owned `/run` directory removed after publication.
+- The foundation's empty-model fallback is removed: an empty deployment list genuinely means no local models, rather than silently deploying upstream's default chat and embedding models.
+- Existing native hosting, delegated authorization, trusted caller partition, session ownership and toolbox behavior are preserved. Existing upstream secret-grant helpers assign runtime read access to the one named GovHub secret.
+
+Guarded source anchors and immutable commits deliberately fail on incompatible upstream changes. No upstream application or infrastructure source is vendored here.
 
 ## Complete UI authentication after provisioning
 
-Registration and delegated consent are ready for the first infrastructure provision. Before publishing the application:
+The single-tenant `ai-agent-demo-ui` registration and consent are ready. It exposes version-2 UI tokens and exactly two delegated `user_impersonation` grants: its own UI API and Foundry (`https://ai.azure.com`). No Microsoft Graph/application permissions were granted to the deployment identity. Consent does not replace Foundry caller RBAC.
+
+Before first application publication:
 
 1. Register the exact frontend HTTPS callback, `https://<frontend-hostname>/auth/oauth/azure-ad/callback`, and configure the UI origin. No placeholder callback or public-client flow was enabled.
-2. Create the confidential-client credential under the tenant's expiry policy and store it directly in the Agent Key Vault as `ui-oauth-client-secret`. Set `authentication.uiClientSecretReference` to the secret URI, never its value. Credential creation is deliberately deferred until that vault exists.
+2. Create an expiring confidential-client credential and store it directly in the Agent Key Vault as `ui-oauth-client-secret`, together with a random `chainlit-auth-secret`. The configured URI is the planned reference, not evidence that a credential already exists. Never store their values in configuration, logs or ordinary Run Command parameters; use protected parameters for a private-host handoff.
 3. Configure upstream's UI OAuth settings with the registered client and exposed UI API scope, keeping the downstream Foundry audience separate. Add only the approved caller/source RBAC grants and verify sign-in and OBO.
 
-The application registration and consent were configured separately using administrator access. The GitHub deployment identity was not granted directory-wide permissions.
+The workflow explicitly fails publication when required vault secrets are missing. Complete the authorized administrator handoff and rerun; infrastructure is reusable. Normal workflow deployment never changes Graph permissions. Automated deployment verification is not proof of a complete end-user sign-in/OBO session.

@@ -6,6 +6,29 @@
   "environmentName": "ai-agent-demo",
   "resourceGroupName": "rg-ai-agent-foundry-ita",
   "applicationResourceGroupName": "rg-ai-agent-app-ita",
+  "keyVaultName": "kv-agent-9fd780c4-ita",
+  "application": {
+    "mode": "conversational",
+    "orchestrationHost": "hosted",
+    "enableRetrieval": false,
+    "enableMcp": false,
+    "deployLocalModels": false
+  },
+  "governance": {
+    "endpoint": "https://apim-jmj2kuossnei2.azure-api.net/openai/",
+    "apiName": "azure-openai-api",
+    "businessUnit": "ATO",
+    "useCaseName": "Agent",
+    "environment": "DEMO",
+    "secretName": "govhub-agent-api-key",
+    "endpointSecretName": "govhub-agent-openai-endpoint",
+    "tokensPerMinute": 10000,
+    "monthlyTokenQuota": 100000
+  },
+  "deploymentHost": {
+    "egressApproved": true,
+    "buildMode": "local"
+  },
   "networking": {
     "resourceGroupName": "rg-ai-agent-network-ita",
     "vnetName": "vnet-ai-agent-ita",
@@ -25,6 +48,6 @@
     "tenantId": "6e689817-26c3-498a-a758-a45e53e81733",
     "uiClientId": "b09c950b-3c2d-4fe9-b617-5aa918379c89",
     "uiApiScope": "api://b09c950b-3c2d-4fe9-b617-5aa918379c89/user_impersonation",
-    "uiClientSecretReference": null
+    "uiClientSecretReference": "https://kv-agent-9fd780c4-ita.vault.azure.net/secrets/ui-oauth-client-secret"
   }
 }

@@ -1,0 +1,132 @@
+name: Deploy AI Agent Landing Zone
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: ai-agent-demo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy private agent (approval required)
+    runs-on: windows-latest
+    environment: demo
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout scenario configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check approved main-only deployment and identity
+        id: settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') { throw 'Deploy from main only.' }
+          foreach ($name in 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID') {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            $parsed = [guid]::Empty
+            if (-not [guid]::TryParse($value, [ref]$parsed) -or $parsed -eq [guid]::Empty) {
+              throw "Missing or invalid demo environment variable: $name"
+            }
+          }
+          $environment = gh api "repos/$env:GITHUB_REPOSITORY/environments/demo"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify the normal demo approval gate.' }
+          $rules = ($environment | ConvertFrom-Json).protection_rules
+          if (@($rules | Where-Object { $_.type -eq 'required_reviewers' -and @($_.reviewers).Count -gt 0 }).Count -eq 0) {
+            throw 'demo requires an actual reviewer approval rule.'
+          }
+          .\ai-agent\Invoke-AiAgent.ps1 -Mode Validate
+          $config = Get-Content .\ai-agent\config\deployment.json -Raw | ConvertFrom-Json
+          if ($config.authentication.tenantId -ne $env:AZURE_TENANT_ID) { throw 'OIDC and UI tenant differ.' }
+          "subscription-id=$($config.subscriptionId)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Test private-host adapter
+        run: .\ai-agent\tests\Test-AiAgentHost.ps1
+
+      - name: Install test Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test actual gateway SDK protocol and fail-closed configuration
+        run: |
+          python -m pip install -r .\ai-agent\tests\requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned test dependency installation failed.' }
+          python -m unittest discover -s .\ai-agent\tests -p test_gateway.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'GovHub runtime adapter tests failed.' }
+
+      - name: Configure pinned upstream outside the scenario repository
+        run: .\ai-agent\Invoke-AiAgent.ps1 -Mode Prepare -OutputPath (Join-Path $env:RUNNER_TEMP 'ai-agent')
+
+      - name: Install pinned Bicep compiler
+        run: |
+          az bicep install --version v0.48.1
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep CLI installation failed.' }
+
+      - name: Compile upstream infrastructure before Azure changes
+        run: |
+          $source = Join-Path $env:RUNNER_TEMP 'ai-agent\agent-landing-zone\infra\bicep\main.bicep'
+          $output = Join-Path $env:RUNNER_TEMP 'ai-agent\main.compiled.json'
+          az bicep build --file $source --outfile $output
+          if ($LASTEXITCODE -ne 0) { throw 'Native upstream infrastructure compilation failed.' }
+          $template = Get-Content $output -Raw | ConvertFrom-Json -AsHashtable
+          $parameters = (Get-Content (Join-Path $env:RUNNER_TEMP 'ai-agent\agent-landing-zone\main.parameters.json') -Raw | ConvertFrom-Json -AsHashtable).parameters
+          $request = @{ properties = @{ mode = 'Incremental'; template = $template; parameters = $parameters } } | ConvertTo-Json -Depth 100 -Compress
+          $bytes = [Text.Encoding]::UTF8.GetByteCount($request)
+          if ($bytes + 64KB -ge 4MB) { throw 'Compact ARM request exceeds the deployment payload limit, including expansion headroom.' }
+          Write-Host "Compact ARM request: $bytes bytes (64KB expansion headroom reserved)."
+
+      - name: Authenticate Azure with the approved existing OIDC identity
+        id: login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.settings.outputs.subscription-id }}
+
+      - name: Register workload resource providers
+        run: |
+          foreach ($namespace in 'Microsoft.Compute', 'Microsoft.Network', 'Microsoft.ManagedIdentity',
+              'Microsoft.CognitiveServices', 'Microsoft.KeyVault', 'Microsoft.AppConfiguration',
+              'Microsoft.ContainerRegistry', 'Microsoft.App', 'Microsoft.Storage',
+              'Microsoft.Insights', 'Microsoft.OperationalInsights', 'Microsoft.Monitor') {
+            az provider register --namespace $namespace --wait --only-show-errors
+            if ($LASTEXITCODE -ne 0) { throw "Resource provider registration failed: $namespace" }
+          }
+
+      - name: Bootstrap private host, platform DNS, peering and scoped firewall routing
+        id: bootstrap
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Bootstrap
+
+      - name: Provision native infrastructure from the private host
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -Phase Provision
+
+      - name: Deploy Agent-specific GovHub product into the private Agent vault
+        run: .\ai-agent\Invoke-AiAgent.ps1 -Mode Governance -OutputPath (Join-Path $env:RUNNER_TEMP 'ai-agent')
+
+      - name: Reconcile private routing and exact registry egress after provisioning
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Bootstrap
+
+      - name: Publish the gateway-routed hosted agent and authenticated private UI
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -Phase Publish
+
+      - name: Verify private services, actual GovHub response and signed-out UI denial
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Run -Repository $env:GITHUB_REPOSITORY -Revision $env:GITHUB_SHA -Phase Verify
+
+      - name: Deallocate only the dedicated private deployment host
+        if: ${{ always() && steps.bootstrap.outcome != 'skipped' && steps.login.outcome == 'success' }}
+        run: .\ai-agent\Invoke-AiAgentHost.ps1 -Action Deallocate

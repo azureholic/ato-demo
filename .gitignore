@@ -10,3 +10,4 @@ platform-alz/output/
 **/crash.*.log
 **/.alzlib/
 **/.terraform.tfstate.lock.info
+ai-agent/**/__pycache__/
