@@ -94,7 +94,12 @@ function Invoke-HostAz {
         $errorInfo = Get-HostAzureError $text
         if ($AllowMissing -and $context.Method -eq 'GET' -and
             $errorInfo.Code -in @('ResourceNotFound', 'ResourceGroupNotFound', 'ParentResourceNotFound', 'NotFound') -and
-            ($null -eq $errorInfo.Status -or $errorInfo.Status -eq 404)) { return $null }
+            ($null -eq $errorInfo.Status -or $errorInfo.Status -eq 404)) {
+            # Actions' pwsh wrapper exits with LASTEXITCODE even after a handled
+            # native error. Only accepted absence is a semantic success.
+            $global:LASTEXITCODE = 0
+            return $null
+        }
         $diagnostic = "$($context.Label) failed (exit $($result.ExitCode); Azure code=$($errorInfo.Code)"
         if ($errorInfo.Status) { $diagnostic += "; HTTP $($errorInfo.Status)" }
         if ($errorInfo.RequestId) { $diagnostic += "; requestId=$($errorInfo.RequestId)" }
@@ -543,10 +548,11 @@ function Ensure-HostNetwork {
         }
     } -ValidateOnly:$ValidateOnly
     # The UDR forces HTTP(S) through the shared firewall's EXISTING approved rules.
+    # Azure-provided DNS bypasses ordinary NSG rules. AzurePlatformDNS is a
+    # deny-only override tag, so an Allow rule for it is invalid.
     $rules = @(
         @{ name = 'deny-all-inbound'; properties = @{ priority = 100; direction = 'Inbound'; access = 'Deny'; protocol = '*'; sourcePortRange = '*'; destinationPortRange = '*'; sourceAddressPrefix = '*'; destinationAddressPrefix = '*' } },
         @{ name = 'vm-agent'; properties = @{ priority = 100; direction = 'Outbound'; access = 'Allow'; protocol = 'Tcp'; sourcePortRange = '*'; destinationPortRanges = @('80', '32526'); sourceAddressPrefix = '*'; destinationAddressPrefix = '168.63.129.16' } },
-        @{ name = 'azure-dns'; properties = @{ priority = 110; direction = 'Outbound'; access = 'Allow'; protocol = '*'; sourcePortRange = '*'; destinationPortRange = '53'; sourceAddressPrefix = '*'; destinationAddressPrefix = 'AzurePlatformDNS' } },
         @{ name = 'managed-identity'; properties = @{ priority = 120; direction = 'Outbound'; access = 'Allow'; protocol = 'Tcp'; sourcePortRange = '*'; destinationPortRange = '80'; sourceAddressPrefix = '*'; destinationAddressPrefix = '169.254.169.254' } },
         @{ name = 'firewall-controlled-web'; properties = @{ priority = 130; direction = 'Outbound'; access = 'Allow'; protocol = 'Tcp'; sourcePortRange = '*'; destinationPortRange = '443'; sourceAddressPrefix = '*'; destinationAddressPrefix = '*' } },
         @{ name = 'deny-other-outbound'; properties = @{ priority = 4000; direction = 'Outbound'; access = 'Deny'; protocol = '*'; sourcePortRange = '*'; destinationPortRange = '*'; sourceAddressPrefix = '*'; destinationAddressPrefix = '*' } }

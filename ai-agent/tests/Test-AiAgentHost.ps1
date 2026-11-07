@@ -47,6 +47,7 @@ function Reset-TestHost {
     $script:keyCalls = 0
     $script:cliReply = @{ ExitCode = 0; Text = '{}' }
     $script:cliInvocations = [Collections.Generic.List[hashtable]]::new()
+    $global:LASTEXITCODE = 0
     $script:resources[$s.HubId] = @{
         id = $s.HubId; properties = @{
             provisioningState = 'Succeeded'; addressSpace = @{ addressPrefixes = @('10.100.0.0/16') }
@@ -138,6 +139,7 @@ function Invoke-HostAz {
 function Invoke-HostNativeAz {
     param([string[]]$Arguments)
     $script:cliInvocations.Add(@{ Arguments = $Arguments })
+    $global:LASTEXITCODE = $script:cliReply.ExitCode
     $script:cliReply
 }
 function Invoke-TestActualArm {
@@ -617,6 +619,62 @@ Test-Case 'Native UI and hosted runtime can reach exact MSAL identity endpoint w
         }
     }
     Assert-Test (@($rules | Where-Object { 'graph.microsoft.com' -in $_.targetFqdns -or '*' -in $_.targetFqdns -or 'Internet' -in $_.targetFqdns }).Count -eq 0) 'No Graph or general Internet rule was introduced.'
+}
+
+Test-Case 'Generated NSG obeys access schema and deny-only platform tag restrictions' {
+    Bootstrap-TestHost
+    $request = @($calls | Where-Object { $_.Method -eq 'PUT' -and $_.Id -eq $s.NsgId })[0]
+    $payload = $request.Body | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable
+    $priorities = @{}
+    foreach ($rule in $payload.properties.securityRules) {
+        $properties = $rule.properties
+        Assert-Test ($properties.access -in @('Allow', 'Deny')) 'Serialized access is a valid NSG enum, not an argument-binding artifact.'
+        Assert-Test ($properties.direction -in @('Inbound', 'Outbound') -and $properties.priority -ge 100 -and $properties.priority -le 4096) 'Direction and priority meet NSG schema.'
+        $key = "$($properties.direction):$($properties.priority)"
+        Assert-Test (-not $priorities.ContainsKey($key)) 'No same-direction duplicate priority.'
+        $priorities[$key] = $true
+        foreach ($prefix in @($properties.sourceAddressPrefix, $properties.destinationAddressPrefix)) {
+            if ($prefix -in @('AzurePlatformDNS', 'AzurePlatformIMDS', 'AzurePlatformLKM')) {
+                Assert-Test ($properties.access -eq 'Deny') 'Platform override tags do not support Allow access.'
+            }
+        }
+    }
+    Assert-Test (@($payload.properties.securityRules | Where-Object { $_.properties.destinationAddressPrefix -eq 'AzurePlatformDNS' }).Count -eq 0) 'Azure-provided DNS stays on its exempt platform path.'
+    $inbound = @($payload.properties.securityRules | Where-Object { $_.properties.direction -eq 'Inbound' })
+    Assert-Test ($inbound.Count -eq 1 -and $inbound[0].properties.access -eq 'Deny') 'No inbound access was relaxed.'
+}
+
+Test-Case 'Accepted not-found clears semantic exit status but real failures preserve it' {
+    $script:cliReply = @{ ExitCode = 1; Text = 'ERROR: Not Found({"error":{"code":"ResourceNotFound","message":"Dedicated VM absent."}})' }
+    $null = Invoke-TestActualArm GET $s.VmId '2024-07-01' -AllowMissing
+    Assert-Test ($global:LASTEXITCODE -eq 0) 'Expected absence is successful for the Actions pwsh exit wrapper.'
+    $script:cliReply = @{ ExitCode = 1; Text = 'ERROR: Forbidden({"error":{"code":"AuthorizationFailed","message":"No permissions."}})' }
+    Assert-Throws { Invoke-TestActualArm GET $s.VmId '2024-07-01' -AllowMissing } 'Azure code=AuthorizationFailed'
+    Assert-Test ($global:LASTEXITCODE -eq 1) 'Forbidden errors are not converted to success.'
+    $script:cliReply = @{ ExitCode = 1; Text = 'ERROR: Not Found({"error":{"code":"ResourceGroupNotFound","message":"Write target absent."}})' }
+    Assert-Throws { Invoke-TestActualArm PUT $s.VmId '2024-07-01' @{} -AllowMissing } 'Azure code=ResourceGroupNotFound'
+    Assert-Test ($global:LASTEXITCODE -eq 1) 'Not-found writes retain failed exit status.'
+}
+
+Test-Case 'Actions-style pwsh wrapper exits zero after missing-VM Deallocate' {
+    $command = @'
+. '__HOST__'
+function Invoke-HostNativeAz {
+    param([string[]]$Arguments)
+    if ($Arguments[0] -ne 'rest' -or $Arguments[2] -ne 'GET') { throw 'Unexpected mutation in cleanup regression.' }
+    $global:LASTEXITCODE = 1
+    @{ ExitCode = 1; Text = 'ERROR: Not Found({"error":{"code":"ResourceNotFound","message":"Dedicated VM absent."}})' }
+}
+Invoke-AiAgentHost -Action Deallocate -ConfigPath '__CONFIG__'
+if (Test-Path Variable:LASTEXITCODE) { exit $LASTEXITCODE }
+'@
+    $hostPath = (Resolve-Path (Join-Path $PSScriptRoot '..\Invoke-AiAgentHost.ps1')).Path.Replace("'", "''")
+    $configPath = (Resolve-Path (Join-Path $PSScriptRoot '..\config\deployment.json')).Path.Replace("'", "''")
+    $command = $command.Replace('__HOST__', $hostPath).Replace('__CONFIG__', $configPath)
+    $output = (& pwsh -NoProfile -Command $command 2>&1 | Out-String)
+    $exitCode = $LASTEXITCODE
+    Assert-Test ($exitCode -eq 0) "Expected successful Actions wrapper exit, got $exitCode. $output"
+    Assert-Test ($output -match 'No deallocation operation needed') 'Child actually executed missing-VM cleanup.'
 }
 
 Write-Host "$script:passed offline host tests passed."
