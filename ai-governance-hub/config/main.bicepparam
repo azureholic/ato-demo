@@ -1,6 +1,7 @@
 using './main.bicep'
 
 var config = loadJsonContent('./deployment.json')
+var dns = loadJsonContent('./private-dns.json')
 
 param environmentName = config.environmentName
 param location = config.location
@@ -16,11 +17,11 @@ param vnetName = config.networking.vnetName
 param apimSubnetName = config.networking.apimSubnetName
 param privateEndpointSubnetName = config.networking.privateEndpointSubnetName
 param functionAppSubnetName = config.networking.functionAppSubnetName
-param dnsZoneRG = config.networking.dns.resourceGroupName
-param dnsSubscriptionId = config.networking.dns.subscriptionId
+param dnsZoneRG = dns.resourceGroupName
+param dnsSubscriptionId = dns.subscriptionId
 
-var dnsZonePrefix = '/subscriptions/${config.networking.dns.subscriptionId}/resourceGroups/${config.networking.dns.resourceGroupName}/providers/Microsoft.Network/privateDnsZones'
-param existingPrivateDnsZones = toObject(items(config.networking.dns.zones), zone => zone.key, zone => '${dnsZonePrefix}/${zone.value}')
+var dnsZonePrefix = '/subscriptions/${dns.subscriptionId}/resourceGroups/${dns.resourceGroupName}/providers/Microsoft.Network/privateDnsZones'
+param existingPrivateDnsZones = toObject(items(dns.zones), zone => zone.key, zone => '${dnsZonePrefix}/${zone.value}')
 param vnetAddressPrefix = config.vnetAddressPrefix
 param apimSubnetPrefix = config.apimSubnetPrefix
 param privateEndpointSubnetPrefix = config.privateEndpointSubnetPrefix

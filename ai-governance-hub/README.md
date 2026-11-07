@@ -18,8 +18,11 @@ No Terraform or external deployment state storage is needed.
 
 - [deployment.json](config/deployment.json): subscription, primary region,
   environment/resource-group name, upstream revision, APIM sizing, network
-  ranges, regional Foundry instances, shared model deployment settings, platform
-  hub and central DNS resource-group/zone references.
+  ranges, regional Foundry instances, shared model deployment settings and platform
+  hub references.
+- [private-dns.json](../platform-alz/config/private-dns.json): platform-owned
+  central DNS subscription, resource group and zone inventory. GovHub consumes
+  this shared file; it does not keep a duplicate DNS configuration.
 - [main.bicepparam](config/main.bicepparam): small scenario overlay for the
   upstream entry point. Its `using './main.bicep'` reference resolves **after
   copying it into the upstream checkout**, not inside this repository.
@@ -29,8 +32,8 @@ No Terraform or external deployment state storage is needed.
   request missing provider registrations and wait up to 15 minutes for readiness.
 - [spoke.bicep](networking/spoke.bicep) and [peering.bicep](networking/peering.bicep):
   small integration templates reusing the pinned upstream VNet module.
-- [private-dns.bicep](../platform-alz/config/private-dns.bicep): reusable platform
-  template for central zones and resolver-free links to connected VNets.
+- [private-dns-links.bicep](../platform-alz/config/private-dns-links.bicep):
+  link-only template referencing existing platform zones.
 
 Initial scenario:
 
@@ -92,20 +95,32 @@ zones or links. Both peerings enable VNet access and forwarded traffic, but no
 gateway transit or remote gateway. Peering does not force egress through the
 Sweden firewall; firewall routing is not changed here.
 
-After spoke deployment, the adapter discovers **all VNets in the configured
-GovHub, platform-hub and DNS subscriptions**, deduplicates them, and deploys the
-11 configured required private DNS zones in platform `rg-dns`. Every zone is
-linked to every discovered VNet with autoregistration disabled. No resolver is
-deployed, and VNets must use Azure-provided DNS; discovering custom DNS stops
-the run instead of claiming that links alone resolve private endpoints.
-Additional VNets receive links on the next deployment or local Network run,
-not continuously.
+The **ALZ platform workflow** provisions `rg-dns`, the 11 shared zones and links
+to all VNets discovered in the subscriptions listed in the platform DNS
+configuration. GovHub checks that the group and every configured zone already
+exist **before creating its spoke or deploying services**; otherwise it fails
+with instructions to deploy the platform first. It never creates the DNS
+resource group or zones.
+
+After spoke deployment, GovHub adds links only for its own VNet to those
+existing zones, using the same deterministic link names as the platform.
+Autoregistration remains disabled. No resolver is deployed, and the spoke must
+use Azure-provided DNS; custom DNS stops the run. Other new VNets receive links
+on the next platform DNS deployment, not continuously.
 
 GovHub uses the supported `useExistingVnet` mode and explicit central zone
 resource IDs. Private endpoints remain workload resources; their zone groups
 manage records in the shared zones. The platform zone template is incremental
 and does not delete existing records or unrelated links. Do not also enable ALZ's
 zone creation for the same zone names in a different resource group.
+
+Keep central zone resource-ID casing stable after deployment. Changing
+`rg-DNS` to `rg-dns` can trigger
+`UpdatingPrivateDnsZoneIdOnPrivateDnsZoneConfigNotAllowed` on existing private
+endpoint zone groups. Deleting the DNS resource group does not remove those
+workload-side associations. Such a migration requires explicitly approved
+recreation of the affected zone groups, preserving the private endpoints and
+verifying their DNS records afterward; DNS can be interrupted during repair.
 
 The pinned upstream main/resource templates do not list Italy North in their
 location allow-lists. The adapter adds only `italynorth` to those two
@@ -146,17 +161,19 @@ before deployment. This is not a DNS, peering or provider-registration workaroun
    are insufficient. Provision these permissions administratively, outside
    this workflow, on the subscription selected in configuration. Provider
    registration requires `/register/action` (included in Contributor/Owner).
-   The same OIDC identity also needs deployment, DNS-zone/link and peering
-   permissions in the **platform** subscription: central `rg-dns`, the hub RG,
-   and permission to join each discovered VNet. It must be able to create
-   `rg-dns` if absent. This workflow does not grant itself access.
-4. Delete the failed Sweden GovHub resource group yourself when ready, before
-   networking discovery, so it is not included in central DNS links. This code
-   contains **no resource deletion**, resource moves or soft-delete purges.
+   The same OIDC identity also needs deployment, DNS-link/zone-join and peering
+   permissions in the **platform** subscription: existing `rg-dns`, the hub RG,
+   and permission to join the GovHub spoke. GovHub does not require permission
+   to create `rg-dns` or zones. This workflow does not grant itself access.
+4. Deploy **Actions > Deploy ALZ Platform (Bicep Accelerator)** first to provision
+   central DNS. Existing `rg-dns`, zones and links are reused incrementally;
+   do not delete them for this ownership change. This code contains **no
+   resource deletion**, resource moves or soft-delete purges.
 5. Open **Actions > Deploy AI Governance Hub > Run workflow** on `main` and
    approve the `demo` environment gate. There is no mode selector: every run
    registers required providers, compiles the templates, prepares spoke/peerings
-   and central DNS, then provisions/publishes the complete GovHub.
+   and links its spoke to existing platform DNS, then provisions/publishes the
+   complete GovHub.
    Compilation and safety checks remain mandatory; there is no separate
    validation-only workflow run.
 

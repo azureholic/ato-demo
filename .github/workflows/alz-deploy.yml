@@ -103,8 +103,24 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           enable-AzPSSession: true
 
+      - name: Test platform deployment and DNS adapters
+        run: .\platform-alz\tests\Test-PlatformAlz.ps1
+
+      - name: Compile shared platform DNS before deployment
+        run: .\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:RUNNER_TEMP\platform-dns" -ValidateOnly
+
       - name: Generate from repository configuration and run official local deployment
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module ALZ -RequiredVersion 7.1.5
           .\platform-alz\Invoke-PlatformAlz.ps1 -OutputPath "$env:RUNNER_TEMP\platform-alz" -RefreshGitHubOidc
+
+      - name: Refresh Azure CLI login for shared platform DNS
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Provision shared platform DNS
+        run: .\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:RUNNER_TEMP\platform-dns"

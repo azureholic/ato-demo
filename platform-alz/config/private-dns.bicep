@@ -14,20 +14,12 @@ resource zones 'Microsoft.Network/privateDnsZones@2020-06-01' = [for zoneName in
   tags: tags
 }]
 
-var links = flatten(map(zoneNames, zone => map(virtualNetworkIds, vnetId => {
-  zoneName: zone
-  vnetId: vnetId
-})))
-
-resource zoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = [for link in links: {
-  name: '${link.zoneName}/vnet-${uniqueString(link.vnetId)}'
-  location: 'global'
-  tags: tags
-  properties: {
-    virtualNetwork: {
-      id: link.vnetId
-    }
-    registrationEnabled: false
+module zoneLinks './private-dns-links.bicep' = {
+  name: 'platform-private-dns-links'
+  params: {
+    zoneNames: zoneNames
+    virtualNetworkIds: virtualNetworkIds
+    tags: tags
   }
   dependsOn: [zones]
-}]
+}

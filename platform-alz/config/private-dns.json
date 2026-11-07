@@ -1,0 +1,22 @@
+{
+  "subscriptionId": "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
+  "resourceGroupName": "rg-dns",
+  "location": "swedencentral",
+  "virtualNetworkSubscriptionIds": [
+    "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
+    "9fd780c4-e4ec-4204-83b9-cedca2c91b8e"
+  ],
+  "zones": {
+    "openai": "privatelink.openai.azure.com",
+    "cognitiveServices": "privatelink.cognitiveservices.azure.com",
+    "aiServices": "privatelink.services.ai.azure.com",
+    "keyVault": "privatelink.vaultcore.azure.net",
+    "eventHub": "privatelink.servicebus.windows.net",
+    "cosmosDb": "privatelink.documents.azure.com",
+    "storageBlob": "privatelink.blob.core.windows.net",
+    "storageFile": "privatelink.file.core.windows.net",
+    "storageTable": "privatelink.table.core.windows.net",
+    "storageQueue": "privatelink.queue.core.windows.net",
+    "apimGateway": "privatelink.azure-api.net"
+  }
+}

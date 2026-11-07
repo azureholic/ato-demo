@@ -235,8 +235,82 @@ function Test-ModuleInstallRetries {
     }
 }
 
+function Test-PlatformDns {
+    $platformDns = Get-Content (Join-Path $root 'config\private-dns.json') -Raw | ConvertFrom-Json
+    $dnsTestState = @{ Failure = ''; Calls = [Collections.Generic.List[string]]::new() }
+    function az {
+        $dnsTestState.Calls.Add("az $($args -join ' ')")
+        $global:LASTEXITCODE = 0
+        if ($args[0] -eq 'bicep') {
+            if ($dnsTestState.Failure -eq 'compile') { $global:LASTEXITCODE = 17; return }
+            Set-Content $args[-1] '{"resources":[]}'
+        } elseif ($args[0] -eq 'network') {
+            if ($dnsTestState.Failure -eq 'inventory') { $global:LASTEXITCODE = 19; return }
+            $vnets = @(
+                @{ id = "/subscriptions/$($args[4])/resourceGroups/rg-test/providers/Microsoft.Network/virtualNetworks/vnet-test"; dhcpOptions = @{ dnsServers = @() } }
+            )
+            if ($args[4] -eq $platformDns.subscriptionId) {
+                $vnets += @{ id = "/subscriptions/$($args[4])/resourceGroups/rg-other/providers/Microsoft.Network/virtualNetworks/vnet-other"; dhcpOptions = @{ dnsServers = @() } }
+            }
+            if ($dnsTestState.Failure -eq 'custom-dns') { $vnets[0].dhcpOptions.dnsServers = @('10.100.0.4') }
+            if ($dnsTestState.Failure -eq 'implicit-dns') {
+                foreach ($vnet in $vnets) { $vnet.Remove('dhcpOptions') }
+            }
+            if ($dnsTestState.Failure -eq 'empty-inventory') { $vnets = @() }
+            ConvertTo-Json -InputObject $vnets -Depth 10
+        } elseif ($args[0] -eq 'group') {
+            if ($dnsTestState.Failure -eq 'group') { $global:LASTEXITCODE = 21 }
+        } elseif ($args[0] -eq 'deployment') {
+            if ($dnsTestState.Failure -eq 'deployment') { $global:LASTEXITCODE = 31 }
+        } else { throw "Unexpected platform DNS command: $args" }
+    }
+    $dnsAdapter = Join-Path $root 'Invoke-PlatformDns.ps1'
+    & $dnsAdapter -OutputPath (Join-Path $testRoot 'dns-validate') -ValidateOnly
+    if ($dnsTestState.Calls.Count -ne 1 -or $dnsTestState.Calls[0] -notlike 'az bicep build *') {
+        throw 'DNS validation must compile offline without Azure reads or writes.'
+    }
+    $dnsTestState.Calls.Clear()
+    $dnsOutput = Join-Path $testRoot 'dns-success'
+    & $dnsAdapter -OutputPath $dnsOutput
+    $parameters = Get-Content (Join-Path $dnsOutput 'private-dns.parameters.json') -Raw | ConvertFrom-Json
+    if ($parameters.parameters.virtualNetworkIds.value.Count -ne 3 -or
+        $parameters.parameters.zoneNames.value.Count -ne @($platformDns.zones.PSObject.Properties).Count -or
+        @($dnsTestState.Calls | Where-Object { $_ -like "az group create --subscription $($platformDns.subscriptionId) --name $($platformDns.resourceGroupName)*" }).Count -ne 1 -or
+        @($dnsTestState.Calls | Where-Object { $_ -like "az deployment group create --subscription $($platformDns.subscriptionId)*--mode Incremental*" }).Count -ne 1) {
+        throw 'Platform DNS must own group/zone provisioning and link every discovered VNet in its configured subscriptions.'
+    }
+    foreach ($case in @(
+        @{ Failure = 'compile'; Error = 'exit code 17' },
+        @{ Failure = 'inventory'; Error = 'exit code 19' },
+        @{ Failure = 'empty-inventory'; Error = 'No VNets found' },
+        @{ Failure = 'custom-dns'; Error = 'uses custom DNS' },
+        @{ Failure = 'group'; Error = 'exit code 21' },
+        @{ Failure = 'deployment'; Error = 'exit code 31' }
+    )) {
+        $dnsTestState.Failure = $case.Failure
+        $dnsTestState.Calls.Clear()
+        Assert-Failure { & $dnsAdapter -OutputPath (Join-Path $testRoot "dns-$($case.Failure)") } $case.Error
+        if ($case.Failure -in 'compile', 'inventory', 'empty-inventory', 'custom-dns', 'group' -and
+            @($dnsTestState.Calls | Where-Object { $_ -like 'az deployment *' }).Count -ne 0) {
+            throw 'DNS prerequisite failures must stop before platform DNS deployment.'
+        }
+    }
+    $dnsTestState.Failure = 'implicit-dns'
+    & $dnsAdapter -OutputPath (Join-Path $testRoot 'dns-implicit')
+    $workflow = Get-Content (Join-Path $root '..\.github\workflows\alz-deploy.yml') -Raw | ConvertFrom-Yaml
+    $stepNames = @($workflow.jobs.deploy.steps.name)
+    $alzIndex = [array]::IndexOf($stepNames, 'Generate from repository configuration and run official local deployment')
+    $refreshIndex = [array]::IndexOf($stepNames, 'Refresh Azure CLI login for shared platform DNS')
+    $dnsIndex = [array]::IndexOf($stepNames, 'Provision shared platform DNS')
+    if ($alzIndex -lt 0 -or $refreshIndex -le $alzIndex -or $dnsIndex -le $refreshIndex) {
+        throw 'Platform DNS must run after successful ALZ deployment and a refreshed Azure CLI login.'
+    }
+    Write-Host 'PASS: platform DNS ownership, all-VNet discovery, offline compilation, prerequisite failures and workflow order.'
+}
+
 try {
     New-Item $testRoot -ItemType Directory | Out-Null
+    Test-PlatformDns
     Test-ModuleInstallRetries
     $env:ARM_CLIENT_ID = [guid]::NewGuid().ToString()
     $env:ARM_TENANT_ID = $config.root_parent_management_group_id

@@ -25,6 +25,8 @@ function Invoke-CheckedCommand {
 $configFile = Join-Path $ConfigPath 'deployment.json'
 $parameterFile = Join-Path $ConfigPath 'main.bicepparam'
 $config = Get-Content $configFile -Raw | ConvertFrom-Json
+$dnsConfigFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'platform-alz\config\private-dns.json'
+$dns = Get-Content $dnsConfigFile -Raw | ConvertFrom-Json
 if ($config.upstreamRevision -cnotmatch '^[0-9a-f]{40}$') {
     throw 'Pin upstreamRevision to a full lowercase Git commit SHA.'
 }
@@ -92,12 +94,13 @@ if ($config.location -eq 'italynorth') {
 
 Copy-Item $configFile (Join-Path $OutputPath 'deployment.json')
 Copy-Item $configFile (Join-Path $infraPath 'deployment.json')
+Copy-Item $dnsConfigFile (Join-Path $infraPath 'private-dns.json')
 Copy-Item $parameterFile (Join-Path $infraPath 'main.bicepparam') -Force
 $networkPath = Join-Path $OutputPath 'networking'
 New-Item $networkPath -ItemType Directory | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'networking\spoke.bicep'), (Join-Path $PSScriptRoot 'networking\peering.bicep') $networkPath
-Copy-Item (Join-Path (Split-Path $PSScriptRoot -Parent) 'platform-alz\config\private-dns.bicep') $networkPath
-foreach ($file in 'spoke', 'private-dns') {
+Copy-Item (Join-Path (Split-Path $PSScriptRoot -Parent) 'platform-alz\config\private-dns-links.bicep') $networkPath
+foreach ($file in 'spoke', 'private-dns-links') {
     Invoke-CheckedCommand az @(
         'bicep', 'build', '--file', (Join-Path $networkPath "$file.bicep"),
         '--outfile', (Join-Path $networkPath "$file.json")
@@ -131,48 +134,57 @@ Write-Host "Compiled ARM request: $payloadBytes bytes."
 Write-Host "Validated upstream $revision with repository configuration."
 if ($Mode -eq 'Validate') { return }
 
+$exists = Invoke-CheckedCommand az @(
+    'group', 'exists', '--subscription', $dns.subscriptionId, '--name', $dns.resourceGroupName, '--output', 'tsv'
+)
+if ($exists -ne 'true') {
+    throw "Shared DNS resource group $($dns.resourceGroupName) is missing; deploy the ALZ platform first."
+}
+$existingZones = Invoke-CheckedCommand az @(
+    'network', 'private-dns', 'zone', 'list', '--subscription', $dns.subscriptionId,
+    '--resource-group', $dns.resourceGroupName, '--output', 'json'
+)
+$zoneNames = @($dns.zones.PSObject.Properties.Value | Select-Object -Unique)
+$existingZoneNames = @($existingZones | ConvertFrom-Json | ForEach-Object { $_.name })
+$missingZones = @($zoneNames | Where-Object { $_ -notin $existingZoneNames })
+if ($missingZones.Count -gt 0) {
+    throw "Shared DNS zones are missing: $($missingZones -join ', '); deploy the ALZ platform first."
+}
 Invoke-CheckedCommand az @(
     'deployment', 'sub', 'create', '--subscription', $config.subscriptionId,
     '--name', "govhub-spoke-$($config.location)", '--location', $config.location,
     '--template-file', (Join-Path $networkPath 'spoke.json'), '--output', 'none'
 )
-$virtualNetworkIds = [Collections.Generic.List[string]]::new()
-foreach ($id in (@($config.subscriptionId, $config.networking.hub.subscriptionId, $config.networking.dns.subscriptionId) | Select-Object -Unique)) {
-    $vnets = Invoke-CheckedCommand az @('network', 'vnet', 'list', '--subscription', $id, '--output', 'json')
-    foreach ($vnet in ($vnets | ConvertFrom-Json)) {
-        $dhcpOptions = $vnet.PSObject.Properties['dhcpOptions']
-        if ($null -ne $dhcpOptions -and $null -ne $dhcpOptions.Value) {
-            $dnsServers = $dhcpOptions.Value.PSObject.Properties['dnsServers']
-            if ($null -ne $dnsServers -and $null -ne $dnsServers.Value -and @($dnsServers.Value).Count -gt 0) {
-                throw "VNet $($vnet.id) uses custom DNS; direct zone links alone cannot provide the requested resolver-free DNS."
-            }
-        }
-        $virtualNetworkIds.Add($vnet.id)
+$vnetJson = Invoke-CheckedCommand az @(
+    'network', 'vnet', 'show', '--subscription', $config.subscriptionId,
+    '--resource-group', $config.networking.resourceGroupName, '--name', $config.networking.vnetName, '--output', 'json'
+)
+$vnet = $vnetJson | ConvertFrom-Json
+$dhcpOptions = $vnet.PSObject.Properties['dhcpOptions']
+if ($null -ne $dhcpOptions -and $null -ne $dhcpOptions.Value) {
+    $dnsServers = $dhcpOptions.Value.PSObject.Properties['dnsServers']
+    if ($null -ne $dnsServers -and $null -ne $dnsServers.Value -and @($dnsServers.Value).Count -gt 0) {
+        throw "VNet $($vnet.id) uses custom DNS; direct zone links alone cannot provide the requested resolver-free DNS."
     }
 }
-if ($virtualNetworkIds.Count -eq 0) { throw 'No VNets found for central DNS links after spoke deployment.' }
-$dns = $config.networking.dns
+if ([string]::IsNullOrWhiteSpace($vnet.id)) { throw 'GovHub spoke lookup returned no VNet ID.' }
 $dnsParameters = @{
     '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
     contentVersion = '1.0.0.0'
     parameters = @{
-        zoneNames = @{ value = @($dns.zones.PSObject.Properties.Value | Select-Object -Unique) }
-        virtualNetworkIds = @{ value = @($virtualNetworkIds.ToArray() | Select-Object -Unique) }
+        zoneNames = @{ value = $zoneNames }
+        virtualNetworkIds = @{ value = @($vnet.id) }
     }
 }
-$dnsParameterPath = Join-Path $networkPath 'private-dns.parameters.json'
+$dnsParameterPath = Join-Path $networkPath 'private-dns-links.parameters.json'
 $dnsParameters | ConvertTo-Json -Depth 10 | Set-Content $dnsParameterPath
 Invoke-CheckedCommand az @(
-    'group', 'create', '--subscription', $dns.subscriptionId, '--name', $dns.resourceGroupName,
-    '--location', $dns.location, '--output', 'none'
-)
-Invoke-CheckedCommand az @(
     'deployment', 'group', 'create', '--subscription', $dns.subscriptionId,
-    '--resource-group', $dns.resourceGroupName, '--name', 'govhub-central-dns',
-    '--template-file', (Join-Path $networkPath 'private-dns.json'),
+    '--resource-group', $dns.resourceGroupName, '--name', 'govhub-spoke-dns-links',
+    '--template-file', (Join-Path $networkPath 'private-dns-links.json'),
     '--parameters', "@$dnsParameterPath", '--mode', 'Incremental', '--output', 'none'
 )
-Write-Host "Prepared spoke peerings and central DNS links for $($virtualNetworkIds.Count) VNets."
+Write-Host 'Prepared GovHub spoke peerings and links to existing platform DNS zones.'
 if ($Mode -eq 'Network') { return }
 
 $previousLocation = Get-Location

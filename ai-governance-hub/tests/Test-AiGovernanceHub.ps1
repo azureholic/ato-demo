@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
 $adapter = Join-Path $root 'Invoke-AiGovernanceHub.ps1'
 $originalConfig = Get-Content (Join-Path $root 'config\deployment.json') -Raw | ConvertFrom-Json
+$platformDns = Get-Content (Join-Path $root '..\platform-alz\config\private-dns.json') -Raw | ConvertFrom-Json
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "ai-governance-hub-tests-$([guid]::NewGuid())"
 $configPath = Join-Path $testRoot 'config'
 New-Item $configPath -ItemType Directory -Force | Out-Null
@@ -66,24 +67,30 @@ function az {
         }
         return
     }
-    if ($args[0] -eq 'group') { return }
+    if ($args[0] -eq 'group') {
+        if ($args[1] -ne 'exists') { throw 'GovHub must not create the shared DNS resource group.' }
+        if ($state.Failure -eq 'missing-dns-group') { 'false' } else { 'true' }
+        return
+    }
     if ($args[0] -eq 'network') {
+        if ($args[1] -eq 'private-dns') {
+            $zones = @($platformDns.zones.PSObject.Properties.Value | ForEach-Object { @{ name = $_ } })
+            if ($state.Failure -eq 'missing-dns-zones') { $zones = @() }
+            ConvertTo-Json -InputObject $zones
+            return
+        }
+        if ($args[2] -ne 'show') { throw 'GovHub must only look up its own spoke, not inventory platform VNets.' }
         $sub = $args[4]
         $vnets = if ($sub -eq $originalConfig.subscriptionId) {
             @(@{
                 id = "/subscriptions/$sub/resourceGroups/$($originalConfig.networking.resourceGroupName)/providers/Microsoft.Network/virtualNetworks/$($originalConfig.networking.vnetName)"
                 dhcpOptions = @{ dnsServers = if ($state.Failure -eq 'custom-dns') { @('10.100.0.4') } else { @() } }
             })
-        } else {
-            @(
-                @{ id = "/subscriptions/$sub/resourceGroups/rg-hub-swe/providers/Microsoft.Network/virtualNetworks/vnet-hub-swe"; dhcpOptions = @{ dnsServers = @() } },
-                @{ id = "/subscriptions/$sub/resourceGroups/rg-other/providers/Microsoft.Network/virtualNetworks/vnet-other"; dhcpOptions = @{ dnsServers = @() } }
-            )
-        }
+        } else { throw 'GovHub must only read its own spoke subscription.' }
         if ($state.Failure -eq 'implicit-dns') {
             foreach ($vnet in $vnets) { $vnet.Remove('dhcpOptions') }
         }
-        ConvertTo-Json -InputObject $vnets -Depth 10
+        @($vnets)[0] | ConvertTo-Json -Depth 10
         return
     }
     if ($state.Failure -eq 'compile') {
@@ -147,6 +154,8 @@ try {
     Assert ($overlay -ceq (Get-Content (Join-Path $configPath 'main.bicepparam') -Raw)) 'The exact scenario parameters must replace upstream defaults.'
     $copied = Get-Content (Join-Path $testRoot 'validate\bicep\infra\deployment.json') -Raw | ConvertFrom-Json
     Assert ($copied.model.name -eq $originalConfig.model.name) 'The model configuration must accompany the parameter overlay.'
+    $copiedDns = Get-Content (Join-Path $testRoot 'validate\bicep\infra\private-dns.json') -Raw
+    Assert ($copiedDns -ceq (Get-Content (Join-Path $root '..\platform-alz\config\private-dns.json') -Raw)) 'GovHub must use the exact shared platform DNS configuration.'
     $patched = Get-Content (Join-Path $testRoot 'validate\bicep\infra\main.bicep') -Raw
     Assert ($patched.Contains("'italynorth', 'uaenorth'")) 'Italy North must be added to the runner-only upstream location allow-list.'
     $loggers = Get-Content (Join-Path $testRoot 'validate\bicep\infra\modules\apim\apim.bicep') -Raw
@@ -156,11 +165,15 @@ try {
 
     Invoke-Case -Name 'network' -Mode Network
     Assert (@($state.Calls | Where-Object { $_ -like 'azd *' }).Count -eq 0) 'Network-only mode must not deploy GovHub services.'
-    $dnsParameters = Get-Content (Join-Path $testRoot 'network\networking\private-dns.parameters.json') -Raw | ConvertFrom-Json
-    Assert ($dnsParameters.parameters.virtualNetworkIds.value.Count -eq 3) 'Central zones must link all VNets in both subscriptions, not only the hub and new spoke.'
-    Assert ($dnsParameters.parameters.zoneNames.value.Count -eq @($originalConfig.networking.dns.zones.PSObject.Properties).Count) 'Central DNS must use the configured required zone inventory.'
+    $dnsParameters = Get-Content (Join-Path $testRoot 'network\networking\private-dns-links.parameters.json') -Raw | ConvertFrom-Json
+    Assert ($dnsParameters.parameters.virtualNetworkIds.value.Count -eq 1 -and $dnsParameters.parameters.virtualNetworkIds.value[0] -like "*/virtualNetworks/$($originalConfig.networking.vnetName)") 'GovHub must link only its spoke to existing central zones.'
+    Assert ($dnsParameters.parameters.zoneNames.value.Count -eq @($platformDns.zones.PSObject.Properties).Count) 'GovHub DNS links must use the platform zone inventory.'
     $networkCalls = @($state.Calls | Where-Object { $_ -like 'az deployment *' })
-    Assert ($networkCalls.Count -eq 2 -and $networkCalls[0] -like "az deployment sub create --subscription $($originalConfig.subscriptionId)*" -and $networkCalls[1] -like "az deployment group create --subscription $($originalConfig.networking.dns.subscriptionId)*") 'Spoke and DNS must deploy to their explicitly configured subscriptions.'
+    Assert ($networkCalls.Count -eq 2 -and $networkCalls[0] -like "az deployment sub create --subscription $($originalConfig.subscriptionId)*" -and $networkCalls[1] -like "az deployment group create --subscription $($platformDns.subscriptionId)*govhub-spoke-dns-links*") 'Spoke and link-only deployments must target their explicitly configured subscriptions.'
+    foreach ($failure in 'missing-dns-group', 'missing-dns-zones') {
+        Invoke-Case -Name $failure -Failure $failure -ExpectedError 'deploy the ALZ platform first'
+        Assert (@($state.Calls | Where-Object { $_ -like 'az deployment *' -or $_ -like 'azd *' }).Count -eq 0) 'Missing platform DNS must stop before any spoke or GovHub deployment.'
+    }
 
     Invoke-Case -Name 'network-failure' -Failure network-deployment -ExpectedError 'exit code 31'
     Assert (@($state.Calls | Where-Object { $_ -like 'az deployment group *' -or $_ -like 'azd *' }).Count -eq 0) 'A failed spoke deployment must stop DNS and GovHub deployment.'

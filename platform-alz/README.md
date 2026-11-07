@@ -22,6 +22,9 @@ endpoint, Blob state access or remote Terraform state is required.**
    In GitHub Actions, `-RefreshGitHubOidc` adds an authentication call to the
    generated `scripts/bicep-deploy.ps1` retry loop. Every stage attempt, including
    retries, obtains a new GitHub assertion and signs in to Az PowerShell again.
+7. After the official ALZ deployment succeeds, sign in to Azure CLI again with
+   a fresh OIDC assertion and provision shared platform DNS. This avoids relying
+   on the CLI login from before a potentially long stack deployment.
 
 The official script deploys **Azure deployment stacks**. Azure stores their
 management metadata; no external state backend is involved. With
@@ -32,14 +35,28 @@ bootstrap. Existing private bootstrap storage and its state are left untouched.
 
 ## Version-controlled configuration
 
-[private-dns.bicep](config/private-dns.bicep) is a separate, reusable platform
-DNS deployment used by the [GovHub workflow](../.github/workflows/ai-governance-hub-deploy.yml).
-It creates shared zones in platform `rg-dns` and links them to all VNets discovered
-in the configured platform/workload subscriptions, without a Private Resolver
-or autoregistration. This is not part of the ALZ stack deployment: keep
-`deployPrivateDnsZones: false` in the ALZ hub parameters to avoid duplicate zone
-ownership. GovHub preparation also adds cross-subscription peerings to the
-existing hub; it does not modify its subnets or firewall routing. See the
+[private-dns.json](config/private-dns.json) owns the central DNS subscription,
+`rg-dns` resource-group name, location, zone inventory and VNet discovery
+subscriptions. The platform workflow runs
+[Invoke-PlatformDns.ps1](Invoke-PlatformDns.ps1) after successful ALZ deployment
+to create the group, shared zones and links to all discovered VNets, without a
+Private Resolver or autoregistration. Discovered VNets must use Azure-provided
+DNS; custom DNS stops the stage before changes.
+
+[private-dns.bicep](config/private-dns.bicep) provisions zones and invokes the
+reusable [link-only module](config/private-dns-links.bicep). This incremental DNS
+stage belongs to the platform workflow but remains outside the ALZ deployment
+stacks: keep `deployPrivateDnsZones: false` in the upstream hub parameters to
+avoid duplicate ownership. Existing zones, DNS records and unrelated links are
+preserved; no deletion or resource move is needed for this handover.
+
+The [GovHub workflow](../.github/workflows/ai-governance-hub-deploy.yml) consumes
+the same platform DNS configuration, requires existing zones and creates only
+its spoke's links and private-endpoint DNS associations. Both workflows use the
+same link names, so platform redeployment does not create duplicate links.
+Other new VNets receive links on the next platform DNS run. GovHub preparation
+also adds cross-subscription peerings to the existing hub; it does not modify
+its subnets or firewall routing. See the
 [GovHub networking guidance](../ai-governance-hub/README.md#provider-readiness-and-network-preparation)
 for permissions, execution order and migration cautions.
 
@@ -67,8 +84,9 @@ The Bicep release provides a general platform example, **not** the Terraform
 release's dedicated SMB tfvars example. These Bicep parameters retain the demo's
 SMB choices: **Sweden Central (`swedencentral`)**, Firewall Basic, one
 `10.100.0.0/16` hub, 30-day Log Analytics retention, AMA/DCRs and paid Defender
-settings. VPN, ExpressRoute, Bastion, private DNS/resolver and a paid DDoS Network
-Protection plan are disabled. The corresponding policy and cross-management-group
+settings. VPN, ExpressRoute, Bastion, upstream-managed private DNS/resolver and a
+paid DDoS Network Protection plan are disabled; central zones are provisioned by
+the separate platform DNS stage. The corresponding policy and cross-management-group
 RBAC exclusions are kept consistent. Review these cost/protection trade-offs.
 
 The shared subscription is placed **once**, under `platform`, not both management
@@ -113,6 +131,21 @@ Az.Resources 10.2.2, and generation-only Terraform 1.14.9. Change the Terraform
 version in both workflow and bootstrap inputs together.
 
 ## GitHub setup and deployment cautions
+
+The deployment identity needs permissions to create `rg-dns` and zones in the
+platform subscription, create VNet links, and read/join VNets in every
+`virtualNetworkSubscriptionIds` subscription. The workflow does not grant
+itself these permissions. Shared DNS configuration now belongs entirely to
+the platform; do not change deployed resource-ID casing during migration.
+
+For a local platform deployment, run `Invoke-PlatformAlz.ps1` first, then:
+
+```powershell
+.\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:TEMP\platform-dns"
+```
+
+Use `-ValidateOnly` on the DNS adapter for offline compilation without Azure
+reads or writes. Run the platform workflow before GovHub for a new environment.
 
 ### First-deployment prerequisites
 
