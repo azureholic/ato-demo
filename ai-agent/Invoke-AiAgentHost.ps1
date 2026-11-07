@@ -326,17 +326,31 @@ function Wait-HostResource {
     throw "Timed out provisioning $Id."
 }
 
+function NormalizeResourceId {
+    param([string]$Id)
+    $Id.ToLowerInvariant()
+}
+
 function Assert-HostSubset {
     param($Actual, $Expected, [string]$Path = 'resource', [switch]$NormalizeResourceLocation)
     if ($Expected -is [System.Collections.IDictionary]) {
+        $identityMap = $Path -match '^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/Microsoft\.App/jobs/[a-z0-9-]+\.identity\.userAssignedIdentities$'
+        if ($identityMap -and ($Actual -isnot [System.Collections.IDictionary] -or $Actual.Count -ne $Expected.Count)) {
+            throw "$Path differs; refusing to replace existing resource."
+        }
         foreach ($key in $Expected.Keys) {
-            if ($null -eq $Actual -or -not $Actual.Contains($key)) { throw "$Path.$key is missing; refusing to replace existing resource." }
-            if ($NormalizeResourceLocation -and $key -ceq 'location' -and $Actual[$key] -is [string] -and $Expected[$key] -is [string]) {
+            $actualKey = $key
+            if ($identityMap) {
+                $matchingKeys = @($Actual.Keys | Where-Object { (NormalizeResourceId $_) -ceq (NormalizeResourceId $key) })
+                if ($matchingKeys.Count -ne 1) { throw "$Path.$key is missing; refusing to replace existing resource." }
+                $actualKey = $matchingKeys[0]
+            } elseif ($null -eq $Actual -or -not $Actual.Contains($key)) { throw "$Path.$key is missing; refusing to replace existing resource." }
+            if ($NormalizeResourceLocation -and $key -ceq 'location' -and $Actual[$actualKey] -is [string] -and $Expected[$key] -is [string]) {
                 # Azure providers may return a region display name instead of its API name.
-                if (($Actual[$key] -replace '\s', '') -ine ($Expected[$key] -replace '\s', '')) {
+                if (($Actual[$actualKey] -replace '\s', '') -ine ($Expected[$key] -replace '\s', '')) {
                     throw "$Path.$key differs; refusing to replace existing resource."
                 }
-            } else { Assert-HostSubset $Actual[$key] $Expected[$key] "$Path.$key" }
+            } else { Assert-HostSubset $Actual[$actualKey] $Expected[$key] "$Path.$key" }
         }
     } elseif ($Expected -is [array]) {
         if (@($Actual).Count -ne $Expected.Count) { throw "$Path differs; refusing to replace existing resource." }

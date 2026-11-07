@@ -311,6 +311,37 @@ try {
         Assert-Throws { Assert-HostSubset @{ properties = @{ location = 'Italy North' } } @{ properties = @{ location = 'italynorth' } } -NormalizeResourceLocation } 'differs'
         Assert-Test (@($calls | Where-Object Method -ne GET).Count -eq $writes) 'Whitespace normalization never weakens owner/private/nested-property guards.'
     }
+    Test-Case 'Actual service JSON UAI resource-ID key casing permits idempotent Job adoption' {
+        Bootstrap-TestHost
+        $writes = @($calls | Where-Object Method -ne GET).Count
+        $providerKey = $s.IdentityId -creplace '/resourceGroups/', '/resourcegroups/'
+        $resources[$s.JobId].identity = @"
+{"type":"UserAssigned","userAssignedIdentities":{"$providerKey":{"clientId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","principalId":"11111111-2222-3333-4444-555555555555"}}}
+"@ | ConvertFrom-Json -AsHashtable
+        Assert-Test (-not $resources[$s.JobId].identity.userAssignedIdentities.Contains($s.IdentityId)) 'Actual JSON fixture reproduces the case-sensitive dictionary-key mismatch.'
+        Bootstrap-TestHost
+        Assert-Test (@($calls | Where-Object Method -ne GET).Count -eq $writes -and $resources[$s.JobId].identity.userAssignedIdentities.Count -eq 1) 'Same UAI is adopted without writes or identity replacement.'
+        $ordinaryMap = '{"Owner":"private"}' | ConvertFrom-Json -AsHashtable
+        Assert-Throws { Assert-HostSubset $ordinaryMap @{ owner = 'private' } "$($s.JobId).tags" } 'is missing'
+        $resourceMap = "{`"$providerKey`":{}}" | ConvertFrom-Json -AsHashtable
+        Assert-Throws { Assert-HostSubset $resourceMap @{ $s.IdentityId = @{} } "$($s.JobId).tags.identity.userAssignedIdentities" } 'is missing'
+    }
+    Test-Case 'Foreign, additional and duplicate-case UAI keys remain fatal' {
+        Bootstrap-TestHost
+        $writes = @($calls | Where-Object Method -ne GET).Count
+        $intendedId = $s.IdentityId
+        $providerKey = $intendedId -creplace '/resourceGroups/', '/resourcegroups/'
+        $foreignId = "$intendedId-foreign"
+        foreach ($json in @(
+            "{`"$foreignId`":{}}",
+            "{`"$intendedId`":{},`"$foreignId`":{}}",
+            "{`"$intendedId`":{},`"$providerKey`":{}}"
+        )) {
+            $resources[$s.JobId].identity.userAssignedIdentities = $json | ConvertFrom-Json -AsHashtable
+            Assert-Throws { Bootstrap-TestHost } 'refusing to replace'
+        }
+        Assert-Test (@($calls | Where-Object Method -ne GET).Count -eq $writes) 'Identity mismatches fail without adoption, mutation or deletion.'
+    }
     Test-Case 'Foreign regions remain fatal for environment, Job and identity adoption' {
         Bootstrap-TestHost
         $writes = @($calls | Where-Object Method -ne GET).Count
