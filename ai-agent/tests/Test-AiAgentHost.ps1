@@ -687,6 +687,33 @@ ERROR: Bad Request({"error":{"code":"InvalidRequestParameterWithDetails","messag
         Assert-Throws { & $script:realHostArm GET $s.JobId '2025-07-01' -AllowMissing } 'HTTP 403'
         Assert-Test ($global:LASTEXITCODE -eq 1) 'Real permissions failure remains failure.'
     }
+    Test-Case 'Canonical role-assignment GET 404 is accepted only for opted-in RG lookup' {
+        $roleId = "/subscriptions/$($s.Config.subscriptionId)/resourceGroups/$($s.Config.resourceGroupName)/providers/Microsoft.Authorization/roleAssignments/be5a2dde-ca74-c7d1-382a-7c0fea728f4f"
+        $fixture = 'ERROR: Not Found({"error":{"code":"RoleAssignmentNotFound","message":"The role assignment ''be5a2dde-ca74-c7d1-382a-7c0fea728f4f'' is not found."}})'
+        $script:cliReply = @{ ExitCode = 1; Text = $fixture }
+        $result = & $script:realHostArm GET $roleId '2022-04-01' -AllowMissing
+        Assert-Test ($null -eq $result -and $global:LASTEXITCODE -eq 0) 'Idempotent role absence is semantic success for Actions wrapper.'
+        Assert-Test ($nativeCalls.Count -eq 1 -and $nativeCalls[0].Arguments[2] -eq 'GET') 'Accepted absence performs only the exact lookup, no mutation or retry.'
+        foreach ($method in @('PUT', 'POST', 'DELETE')) {
+            Assert-Throws { & $script:realHostArm $method $roleId '2022-04-01' -AllowMissing } 'RoleAssignmentNotFound'
+            Assert-Test ($global:LASTEXITCODE -eq 1) 'Mutation failures retain native failure status.'
+        }
+        Assert-Throws { & $script:realHostArm GET $roleId '2022-04-01' } 'RoleAssignmentNotFound'
+        Assert-Test ($global:LASTEXITCODE -eq 1) 'Unopted lookup remains fatal.'
+        foreach ($id in @($s.JobId, "$roleId/extra", ($roleId -replace '/resourceGroups/[^/]+', ''))) {
+            Assert-Throws { & $script:realHostArm GET $id '2022-04-01' -AllowMissing } 'RoleAssignmentNotFound'
+            Assert-Test ($global:LASTEXITCODE -eq 1) 'Unrelated, child and subscription-wide paths are not accepted.'
+        }
+        foreach ($text in @(
+            ($fixture -replace 'Not Found\(', 'Forbidden('),
+            'ERROR: (RoleAssignmentNotFound) Missing without canonical HTTP404.',
+            ($fixture -replace '"RoleAssignmentNotFound"', '"UnexpectedNotFound"')
+        )) {
+            $script:cliReply.Text = $text
+            Assert-Throws { & $script:realHostArm GET $roleId '2022-04-01' -AllowMissing } 'failed'
+            Assert-Test ($global:LASTEXITCODE -eq 1) 'Wrong status, missing HTTP status and unknown404 remain fatal.'
+        }
+    }
     Test-Case 'Absent Cleanup is a no-op and deallocation interface is removed' {
         Invoke-TestHost Cleanup | Out-Null
         Assert-Test ($requests.Count -eq 0 -and @($calls | Where-Object Method -ne GET).Count -eq 0) 'Absent infrastructure not recreated for cleanup.'

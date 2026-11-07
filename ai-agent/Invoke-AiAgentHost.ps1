@@ -107,6 +107,7 @@ function Get-HostCommandContext {
     param([string[]]$Arguments)
     $method = $null
     $target = $null
+    $resourcePath = $null
     if ($Arguments[0] -eq 'rest') {
         $methodIndex = [Array]::IndexOf($Arguments, '--method')
         $urlIndex = [Array]::IndexOf($Arguments, '--url')
@@ -115,12 +116,13 @@ function Get-HostCommandContext {
         if ($urlIndex -ge 0 -and $urlIndex + 1 -lt $Arguments.Count -and
             [Uri]::TryCreate($Arguments[$urlIndex + 1], [UriKind]::Absolute, [ref]$uri) -and $uri.Host -eq 'management.azure.com') {
             $target = $uri.AbsolutePath
+            $resourcePath = $uri.AbsolutePath
             if ($uri.Query -match '(?:^\?|&)api-version=([0-9-]+)') { $target += " (api-version=$($Matches[1]))" }
         }
     }
     $label = if ($method) { "ARM $method" } else { "Azure CLI $($Arguments[0])" }
     if ($target) { $label += " $target" }
-    @{ Method = $method; Label = $label }
+    @{ Method = $method; Label = $label; ResourcePath = $resourcePath }
 }
 
 function Invoke-HostAz {
@@ -130,9 +132,12 @@ function Invoke-HostAz {
     $context = Get-HostCommandContext $Arguments
     if ($result.ExitCode -ne 0) {
         $errorInfo = Get-HostAzureError $text
+        $guidPattern = '[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
+        $missingRoleLookup = $errorInfo.Code -ceq 'RoleAssignmentNotFound' -and $errorInfo.Status -eq 404 -and
+            $context.ResourcePath -match "^/subscriptions/$guidPattern/resourceGroups/[A-Za-z0-9_.()-]+/providers/Microsoft.Authorization/roleAssignments/$guidPattern$"
         if ($AllowMissing -and $context.Method -eq 'GET' -and
-            $errorInfo.Code -in @('ResourceNotFound', 'ResourceGroupNotFound', 'ParentResourceNotFound', 'NotFound') -and
-            ($null -eq $errorInfo.Status -or $errorInfo.Status -eq 404)) {
+            (($errorInfo.Code -in @('ResourceNotFound', 'ResourceGroupNotFound', 'ParentResourceNotFound', 'NotFound') -and
+                ($null -eq $errorInfo.Status -or $errorInfo.Status -eq 404)) -or $missingRoleLookup)) {
             # Actions' pwsh wrapper exits with LASTEXITCODE even after a handled
             # native error. Only accepted absence is a semantic success.
             $global:LASTEXITCODE = 0
