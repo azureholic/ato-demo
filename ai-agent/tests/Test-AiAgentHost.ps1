@@ -7,9 +7,52 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '..\Invoke-AiAgentHost.ps1')
 $script:readSettings = ${function:Get-HostSettings}
 $script:realHostArm = ${function:Invoke-HostArm}
+$script:realHostHttp = ${function:Invoke-HostHttp}
 $script:passed = 0
 $script:useFixture = $false
 $savedToken = $env:GH_TOKEN
+if (-not ('AiAgentOfflineHttpHandler' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class AiAgentOfflineIOException : IOException {
+    public AiAgentOfflineIOException() : base("credentialMessage bodySecret ?sig=querySecret") {
+        HResult = unchecked((int)0x80070035);
+    }
+}
+public sealed class AiAgentOfflineHttpHandler : HttpMessageHandler {
+    public int Code = 200;
+    public string Location;
+    public string CapturedIfMatch;
+    public string CapturedBody;
+    public string ResponseText = "{\"properties\":{\"provisioningState\":\"Succeeded\"}}";
+    public bool ThrowTransport;
+    public bool Disposed;
+    public int Calls;
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+        if (Disposed) throw new ObjectDisposedException("offlineHandler");
+        Calls++;
+        IEnumerable<string> values;
+        if (request.Headers.TryGetValues("If-Match", out values)) CapturedIfMatch = string.Join(",", values);
+        CapturedBody = request.Content == null ? null : await request.Content.ReadAsStringAsync().ConfigureAwait(false);
+        if (ThrowTransport) throw new HttpRequestException("credentialMessage bodySecret ?sig=querySecret", new AiAgentOfflineIOException());
+        var response = new HttpResponseMessage((HttpStatusCode)Code);
+        response.Content = new StringContent(ResponseText);
+        if (Location != null) response.Headers.TryAddWithoutValidation("Location", Location);
+        return response;
+    }
+    protected override void Dispose(bool disposing) {
+        Disposed = true;
+        base.Dispose(disposing);
+    }
+}
+'@
+}
 function Assert-Test {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw "FAIL: $Message" }
@@ -192,6 +235,21 @@ function Invoke-TestHost {
     finally { $script:useFixture = $false }
 }
 function Bootstrap-TestHost { Invoke-TestHost | Out-Null }
+function Invoke-TestActualHttp {
+    param([AiAgentOfflineHttpHandler]$Handler, [string]$Method, [string]$Url, [hashtable]$Body, [string]$IfMatch)
+    $http = ${function:Invoke-HostHttp}
+    $factory = ${function:New-HostHttpClient}
+    $script:offlineHandler = $Handler
+    try {
+        Set-Item Function:Invoke-HostHttp -Value $script:realHostHttp
+        Set-Item Function:New-HostHttpClient -Value { [Net.Http.HttpClient]::new($script:offlineHandler) }
+        Invoke-HostMemoryRequest $Method $Url 'offlineHeaderToken' $Body -IfMatch $IfMatch
+    } finally {
+        Set-Item Function:Invoke-HostHttp -Value $http
+        Set-Item Function:New-HostHttpClient -Value $factory
+        $script:offlineHandler = $null
+    }
+}
 function New-TestLegacySubnet {
     Ensure-HostNetwork $s
     $resources[$s.SubnetId].properties.delegations = @()
@@ -327,6 +385,47 @@ try {
         Assert-Test (-not $requests[1].Json) 'DELETE needs no body to carry its optimistic-lock header.'
         Assert-Test (@($nativeCalls | Where-Object { $_.Arguments[0] -eq 'rest' }).Count -eq 0) 'Conditional headers never pass through Azure CLI parsing.'
         Assert-Test (@(Get-ChildItem (Get-Location) -Filter '.ai-agent-host-*.json').Count -eq 0) 'Conditional bodies stay in memory.'
+    }
+    Test-Case 'Actual HttpClient accepts provider bare GUID firewall ETag and a large body' {
+        $handler = [AiAgentOfflineHttpHandler]::new()
+        $etag = 'ba2cfaf5-3f7a-4257-be84-dc34cd745657'
+        $body = @{ properties = @{ priority = 3500; payload = ('α' * 600000) } }
+        $url = "https://management.azure.com$($s.FirewallPolicyId)/ruleCollectionGroups/rcg-ai-agent-private-9fd780c4?api-version=2024-05-01"
+        $result = Invoke-TestActualHttp $handler PUT $url $body $etag
+        Assert-Test ($result.StatusCode -eq 200 -and $handler.CapturedIfMatch -ceq $etag) 'Bare provider ETag reaches actual HttpClient handler unchanged, never rejected/quoted/replaced.'
+        Assert-Test ([Text.Encoding]::UTF8.GetByteCount($handler.CapturedBody) -gt 1000000) 'Large UTF8 request body passes real send and response handling.'
+        Assert-Test ($handler.Calls -eq 1 -and $handler.Disposed) 'Single bounded request; handler/client disposed after completion.'
+    }
+    Test-Case 'Repeated actual transport uses independent clients and preserves asynchronous Location' {
+        foreach ($etag in @('W/"f5edc543-86f7-4ff8-95ed-44d11e54ac82"', '"f5edc543-86f7-4ff8-95ed-44d11e54ac82"')) {
+            $handler = [AiAgentOfflineHttpHandler]::new()
+            $handler.Code = 202
+            $handler.ResponseText = ''
+            $handler.Location = "https://management.azure.com/subscriptions/$($s.Config.subscriptionId)/operations/accepted?api-version=2024-05-01"
+            $result = Invoke-TestActualHttp $handler PUT 'https://management.azure.com/owned' @{ properties = @{} } $etag
+            Assert-Test ($result.StatusCode -eq 202 -and $result.Location -eq $handler.Location -and $null -eq $result.Value) 'Accepted asynchronous response survives actual response/header handling without guessed success.'
+            Assert-Test ($handler.CapturedIfMatch -ceq $etag -and $handler.Disposed) 'Strong/weak quotes preserved and each handler independently disposed.'
+        }
+    }
+    Test-Case 'Transport diagnostics expose endpoint, stage and exception types but no sensitive messages' {
+        $handler = [AiAgentOfflineHttpHandler]::new()
+        $handler.ThrowTransport = $true
+        $url = 'https://management.azure.com/subscriptions/owned/resourceGroups/network/providers/Microsoft.Network/firewallPolicies/policy/ruleCollectionGroups/group?sig=querySecret&token=urlToken'
+        $diagnostic = ''
+        try { Invoke-TestActualHttp $handler PUT $url @{ protectedValue = 'bodySecret' } 'ba2cfaf5-3f7a-4257-be84-dc34cd745657' | Out-Null }
+        catch { $diagnostic = $_.Exception.Message }
+        Assert-Test ($diagnostic -match 'HTTPS PUT management.azure.com/subscriptions/owned/.*ruleCollectionGroups/group failed at send-request') 'Safe method/host/path and exact failing stage surfaced.'
+        Assert-Test ($diagnostic -match 'System.Net.Http.HttpRequestException' -and $diagnostic -match 'AiAgentOfflineIOException HResult=0x80070035') 'Underlying exception types and HRESULTs identify transport root cause.'
+        Assert-Test ($diagnostic -notmatch 'credentialMessage|bodySecret|querySecret|urlToken|offlineHeaderToken|sig=|token=') 'No exception messages, query/SAS, request body, header credentials or stack leakage.'
+        Assert-Test ($handler.Calls -eq 1 -and $handler.Disposed) 'Transport exception is not blindly retried and resources are disposed.'
+    }
+    Test-Case 'Header construction faults are diagnosed separately from transport without a send' {
+        $handler = [AiAgentOfflineHttpHandler]::new()
+        $diagnostic = ''
+        try { Invoke-TestActualHttp $handler PUT 'https://management.azure.com/owned?token=urlToken' @{ secret = 'bodySecret' } '*' | Out-Null }
+        catch { $diagnostic = $_.Exception.Message }
+        Assert-Test ($diagnostic -match 'failed at create-request.*System.Management.Automation.RuntimeException HResult=0x') 'Code/header validation fault is identified, not disguised as a service failure.'
+        Assert-Test ($handler.Calls -eq 0 -and $handler.Disposed -and $diagnostic -notmatch 'urlToken|bodySecret') 'No request sent and no sensitive context leaked.'
     }
     Test-Case 'HTTP 412 remains an explicit failure without wildcard or blind retries' {
         $httpQueue.Enqueue(@{ StatusCode = 412; Text = '{"error":{"code":"PreconditionFailedEtagMismatch"}}'; Location = $null })

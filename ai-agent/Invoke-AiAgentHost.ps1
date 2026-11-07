@@ -160,38 +160,75 @@ function Invoke-HostArm {
 
 function New-HostHttpRequest {
     param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json, [string]$IfMatch)
-    if ($IfMatch -and $IfMatch -cnotmatch '^(?:W/)?"[^"\r\n]+"$') { throw 'If-Match must be an exact quoted strong/weak ETag, never a wildcard.' }
+    if ($IfMatch -and $IfMatch -cnotmatch '^(?:W/)?"[^"\r\n]+"$' -and
+        $IfMatch -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+        throw 'If-Match must be an exact quoted strong/weak ETag or provider GUID, never a wildcard.'
+    }
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), $Url)
     $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $Token)
     $request.Headers.UserAgent.ParseAdd('ato-private-job-controller/1.0')
     $request.Headers.Accept.ParseAdd('application/json')
-    if ($IfMatch) { $request.Headers.Add('If-Match', $IfMatch) }
+    # Firewall ruleCollectionGroups return bare GUID ETags; Network subnets use
+    # quoted weak ETags. Preserve either provider value without normalization.
+    if ($IfMatch -and -not $request.Headers.TryAddWithoutValidation('If-Match', $IfMatch)) { throw 'Could not attach the exact If-Match header.' }
     if ($Url.StartsWith('https://api.github.com/')) { $request.Headers.Add('X-GitHub-Api-Version', '2022-11-28') }
     if (-not [string]::IsNullOrEmpty($Json)) { $request.Content = [Net.Http.StringContent]::new($Json, [Text.Encoding]::UTF8, 'application/json') }
     $request
 }
 
-function Invoke-HostHttp {
-    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json, [string]$IfMatch)
+function New-HostHttpClient {
     $handler = [Net.Http.HttpClientHandler]::new()
     $handler.AllowAutoRedirect = $false
     $client = [Net.Http.HttpClient]::new($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(120)
+    $client
+}
+
+function Get-HostTransportFailure {
+    param([string]$Method, [string]$Url, [Exception]$Exception, [string]$Stage, [long]$ElapsedMilliseconds)
+    $uri = $null
+    $endpoint = '[invalid endpoint]'
+    if ([Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri)) {
+        $endpoint = ConvertTo-HostSafeText "$($uri.Host)$($uri.AbsolutePath)" -Limit 1024
+    }
+    $types = [Collections.Generic.List[string]]::new()
+    $current = $Exception
+    for ($depth = 0; $current -and $depth -lt 6; $depth++) {
+        $types.Add("$($current.GetType().FullName) HResult=0x$($current.HResult.ToString('X8'))")
+        $current = $current.InnerException
+    }
+    # Exception messages, stacks, Data, URLs' query strings and response bodies
+    # can contain credentials. Only structural metadata crosses this boundary.
+    "HTTPS $Method $endpoint failed at $Stage after ${ElapsedMilliseconds}ms; exception chain: $($types -join ' -> '). Messages, query, response and credentials omitted."
+}
+
+function Invoke-HostHttp {
+    param([string]$Method, [string]$Url, [string]$Token, [AllowNull()][string]$Json, [string]$IfMatch)
+    $client = $null
     $request = $null
     $response = $null
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $stage = 'create-client'
     try {
+        $client = New-HostHttpClient
+        $stage = 'create-request'
         $request = New-HostHttpRequest $Method $Url $Token $Json $IfMatch
+        $stage = 'send-request'
         $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        $stage = 'read-response'
+        $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $stage = 'read-location'
+        $location = if ($response.Headers.Location) { $response.Headers.Location.ToString() } else { $null }
         @{
             StatusCode = [int]$response.StatusCode
-            Text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-            Location = if ($response.Headers.Location) { $response.Headers.Location.ToString() } else { $null }
+            Text = $text; Location = $location
         }
-    } catch { throw "HTTPS $Method transport failed; response and credentials omitted." }
+    } catch { throw (Get-HostTransportFailure $Method $Url $_.Exception $stage $clock.ElapsedMilliseconds) }
     finally {
+        $clock.Stop()
         if ($response) { $response.Dispose() }
         if ($request) { $request.Dispose() }
-        $client.Dispose()
+        if ($client) { $client.Dispose() }
     }
 }
 
