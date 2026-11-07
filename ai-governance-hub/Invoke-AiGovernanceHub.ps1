@@ -22,6 +22,7 @@ function Invoke-CheckedCommand {
     }
 }
 
+$ConfigPath = [IO.Path]::GetFullPath($ConfigPath)
 $configFile = Join-Path $ConfigPath 'deployment.json'
 $parameterFile = Join-Path $ConfigPath 'main.bicepparam'
 $config = Get-Content $configFile -Raw | ConvertFrom-Json
@@ -221,6 +222,7 @@ try {
         '--location', $config.location, '--no-prompt'
     )
     Invoke-CheckedCommand azd @('provision', '--environment', $config.environmentName, '--no-prompt')
+    & (Join-Path $PSScriptRoot 'Set-LogicAppStorageExemption.ps1') -ConfigPath $ConfigPath
     Invoke-CheckedCommand azd @('deploy', '--environment', $config.environmentName, '--no-prompt')
 } finally {
     Set-Location $previousLocation

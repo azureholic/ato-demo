@@ -97,7 +97,7 @@ jobs:
           azd auth login --client-id $env:AZURE_CLIENT_ID --tenant-id $env:AZURE_TENANT_ID --federated-credential-provider github --no-prompt
           if ($LASTEXITCODE -ne 0) { throw 'azd GitHub OIDC authentication failed.' }
 
-      - name: Clone pinned upstream, apply configuration and deploy GovHub
+      - name: Provision GovHub, apply scoped storage waiver and publish Logic App
         run: |
           .\ai-governance-hub\Invoke-AiGovernanceHub.ps1 `
             -OutputPath "$env:RUNNER_TEMP\ai-governance-hub" `

@@ -4,6 +4,10 @@
   "location": "italynorth",
   "environmentName": "ai-governance-demo",
   "resourceGroupName": "rg-ai-governance-ita",
+  "storagePolicyExemption": {
+    "policyAssignmentId": "/providers/Microsoft.Management/managementGroups/6e689817-26c3-498a-a758-a45e53e81733/providers/Microsoft.Authorization/policyAssignments/MCAPSGovDeployPolicies",
+    "policyDefinitionReferenceId": "StorageAccountDisableLocalAuth"
+  },
   "apimSku": "StandardV2",
   "apimSkuUnits": 1,
   "vnetAddressPrefix": "10.170.0.0/24",

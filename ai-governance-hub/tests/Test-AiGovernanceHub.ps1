@@ -9,7 +9,11 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) "ai-governance-hub-tests-$([gui
 $configPath = Join-Path $testRoot 'config'
 New-Item $configPath -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $root 'config\main.bicepparam') $configPath
-$state = @{ Failure = ''; Calls = [Collections.Generic.List[string]]::new(); ProviderReads = 0 }
+$state = @{
+    Failure = ''; Calls = [Collections.Generic.List[string]]::new(); ProviderReads = 0
+    Exemption = $null; SharedKey = $false
+    StorageScope = "/subscriptions/$($originalConfig.subscriptionId)/resourceGroups/$($originalConfig.resourceGroupName)/providers/Microsoft.Storage/storageAccounts/funcusagetest123"
+}
 $previousLocation = Get-Location
 $previousExitCode = Get-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
 $previousExitCodeValue = if ($previousExitCode) { $previousExitCode.Value } else { $null }
@@ -57,6 +61,45 @@ function git {
 function az {
     $state.Calls.Add("az $($args -join ' ')")
     $global:LASTEXITCODE = 0
+    if ($args[0] -eq 'storage') {
+        if ($args[2] -eq 'update') {
+            if ($state.Failure -ne 'waiver-propagation') { $state.SharedKey = $true }
+            return
+        }
+        @{
+            id = $state.StorageScope
+            publicNetworkAccess = if ($state.Failure -eq 'public-storage') { 'Enabled' } else { 'Disabled' }
+            allowSharedKeyAccess = $state.SharedKey
+        } | ConvertTo-Json
+        return
+    }
+    if ($args[0] -eq 'resource') {
+        ConvertTo-Json -InputObject @(@{
+            id = "/subscriptions/$($originalConfig.subscriptionId)/resourceGroups/$($originalConfig.resourceGroupName)/providers/Microsoft.Web/sites/logic-usage-test"
+            name = 'logic-usage-test'; kind = 'functionapp,workflowapp'
+            tags = @{ 'azd-service-name' = 'usageProcessingLogicApp' }
+        })
+        return
+    }
+    if ($args[0] -eq 'policy') {
+        if ($args[2] -eq 'list') {
+            ConvertTo-Json -InputObject @($(if ($null -ne $state.Exemption) { $state.Exemption }))
+        } elseif ($args[2] -eq 'create') {
+            if ($state.Failure -eq 'waiver-permission') { $global:LASTEXITCODE = 33; return }
+            $state.Exemption = @{
+                id = "$($state.StorageScope)/providers/Microsoft.Authorization/policyExemptions/govhub-logic-storage-shared-key"
+                name = 'govhub-logic-storage-shared-key'
+                policyAssignmentId = $originalConfig.storagePolicyExemption.policyAssignmentId
+                policyDefinitionReferenceIds = @('StorageAccountDisableLocalAuth')
+                exemptionCategory = 'Waiver'; expiresOn = $null
+            }
+        } else {
+            if ($state.Failure -eq 'waiver-verification') { $state.Exemption.policyDefinitionReferenceIds += 'StorageAccountPublicNetworkModify' }
+            $state.Exemption | ConvertTo-Json
+        }
+        return
+    }
+    if ($args[0] -eq 'webapp') { return }
     if ($args[0] -eq 'provider') {
         if ($args[1] -eq 'show') {
             if ($state.Failure -eq 'provider-read') { $global:LASTEXITCODE = 17; return }
@@ -74,6 +117,7 @@ function az {
         return
     }
     if ($args[0] -eq 'deployment') {
+        if ($args[2] -eq 'show') { 'funcusagetest123'; return }
         if (($state.Failure -eq 'network-deployment' -and $args[1] -eq 'sub') -or
             ($state.Failure -eq 'dns-deployment' -and $args[1] -eq 'group')) {
             $global:LASTEXITCODE = 31
@@ -136,6 +180,8 @@ function Invoke-Case {
     param([string]$Name, [string]$Failure = '', [string]$ExpectedError = '', [string]$Mode = 'Deploy')
     $state.Calls.Clear()
     $state.Failure = $Failure
+    $state.Exemption = $null
+    $state.SharedKey = $false
     $originalConfig | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $configPath 'deployment.json')
     $path = Join-Path $testRoot $Name
     if ($Name -eq 'existing') { New-Item $path -ItemType Directory | Out-Null }
@@ -202,6 +248,47 @@ try {
     Invoke-Case -Name 'deploy'
     $azdCalls = @($state.Calls | Where-Object { $_ -like 'azd *' })
     Assert ($azdCalls.Count -eq 3 -and $azdCalls[1] -like 'azd provision *' -and $azdCalls[2] -like 'azd deploy *') 'Provisioning must precede deployment of upstream application code.'
+    $calls = @($state.Calls)
+    $provisionIndex = [array]::FindIndex($calls, [Predicate[string]]{ param($call) $call -like 'azd provision *' })
+    $waiverIndex = [array]::FindIndex($calls, [Predicate[string]]{ param($call) $call -like 'az policy exemption create *' })
+    $updateIndex = [array]::FindIndex($calls, [Predicate[string]]{ param($call) $call -like 'az storage account update *' })
+    $restartIndex = [array]::FindIndex($calls, [Predicate[string]]{ param($call) $call -like 'az webapp restart *' })
+    $deployIndex = [array]::FindIndex($calls, [Predicate[string]]{ param($call) $call -like 'azd deploy *' })
+    Assert ($provisionIndex -lt $waiverIndex -and $waiverIndex -lt $updateIndex -and $updateIndex -lt $restartIndex -and $restartIndex -lt $deployIndex) 'Create the waiver, restore keys and restart only between provisioning and application deployment.'
+    Assert ($calls[$waiverIndex].Contains("--scope $($state.StorageScope) ") -and $calls[$waiverIndex].Contains('--policy-definition-reference-ids StorageAccountDisableLocalAuth ') -and -not $calls[$waiverIndex].Contains('--expires-on')) 'The approved no-expiry waiver must target only the runtime account and shared-key policy.'
+    Assert (-not $calls[$updateIndex].Contains('--public-network-access')) 'Repair must not enable public storage access.'
+
+    $state.Calls.Clear()
+    & (Join-Path $root 'Set-LogicAppStorageExemption.ps1') -ConfigPath $configPath
+    Assert (@($state.Calls | Where-Object { $_ -like 'az policy exemption create *' -or $_ -like 'az storage account update *' -or $_ -like 'az webapp restart *' }).Count -eq 0) 'An existing matching waiver and healthy account must cause no writes or restarts.'
+    $state.Exemption.expiresOn = '2026-12-07T23:59:59Z'
+    $state.Calls.Clear()
+    $caught = $null
+    try {
+        & (Join-Path $root 'Set-LogicAppStorageExemption.ps1') -ConfigPath $configPath
+    } catch { $caught = $_.Exception.Message }
+    Assert ($null -ne $caught -and $caught.Contains('review it rather than overwriting')) 'Do not silently replace an existing time-limited waiver with a permanent one.'
+    Assert (@($state.Calls | Where-Object { $_ -like 'az policy exemption create *' -or $_ -like 'az storage account update *' }).Count -eq 0) 'Conflicting waivers must stop before writes.'
+
+    foreach ($failure in 'waiver-permission', 'waiver-verification', 'public-storage') {
+        $expected = switch ($failure) {
+            waiver-permission { 'policyAssignments/exempt/action' }
+            waiver-verification { 'review it rather than overwriting' }
+            public-storage { 'retain disabled public network access' }
+        }
+        Invoke-Case -Name $failure -Failure $failure -ExpectedError $expected
+        Assert (@($state.Calls | Where-Object { $_ -like 'az storage account update *' -or $_ -like 'az webapp restart *' -or $_ -like 'azd deploy *' }).Count -eq 0) 'Unsafe or unverified exemptions must stop storage changes and application deployment.'
+    }
+    $state.Failure = 'waiver-propagation'
+    $state.Exemption = $null
+    $state.SharedKey = $false
+    $state.Calls.Clear()
+    $caught = $null
+    try {
+        & (Join-Path $root 'Set-LogicAppStorageExemption.ps1') -ConfigPath $configPath -TimeoutSeconds 1 -PollIntervalSeconds 1
+    } catch { $caught = $_.Exception.Message }
+    Assert ($null -ne $caught -and $caught.Contains('propagation timeout')) 'Policy propagation must have a bounded wait with an explicit failure.'
+    Assert (@($state.Calls | Where-Object { $_ -like 'az webapp restart *' }).Count -eq 0) 'Do not restart the Logic App while key access remains disabled.'
 
     Invoke-Case -Name 'provision-failure' -Failure provision -ExpectedError 'exit code 29'
     Assert (@($state.Calls | Where-Object { $_ -like 'azd deploy *' }).Count -eq 0) 'Failed provisioning must stop application deployment.'

@@ -10,7 +10,7 @@ workflow. It clones a **pinned upstream commit into runner temporary storage**,
 copies our configuration into the checkout, compiles the networking and GovHub
 templates, checks the compact ARM request against the 4 MB limit, then
 registers providers, prepares networking/DNS and runs upstream `azd provision`
-followed by `azd deploy`. The latter publishes the usage ingestion Logic App;
+followed by the scoped storage waiver and `azd deploy`. The latter publishes the usage ingestion Logic App;
 infrastructure-only deployment would leave it unpublished.
 No Terraform or external deployment state storage is needed.
 
@@ -30,6 +30,9 @@ No Terraform or external deployment state storage is needed.
   compile, prepare networking/DNS and optionally invoke upstream deployment commands.
 - [Register-ResourceProviders.ps1](Register-ResourceProviders.ps1): idempotently
   request missing provider registrations and wait up to 15 minutes for readiness.
+- [Set-LogicAppStorageExemption.ps1](Set-LogicAppStorageExemption.ps1): create or
+  verify the runtime storage waiver, restore key access and restart the Logic App
+  when the waiver or account changes.
 - [spoke.bicep](networking/spoke.bicep) and [peering.bicep](networking/peering.bicep):
   small integration templates reusing the pinned upstream VNet module.
 - [private-dns-links.bicep](../platform-alz/config/private-dns-links.bicep):
@@ -151,6 +154,41 @@ containing only an empty string. The adapter corrects that one schema to
 ID, other API definitions and OpenAPI version. The original parameter and
 invalid schema must match exactly or deployment stops for upstream review.
 See [TODO.md](TODO.md) for the upstream contribution details.
+
+## Runtime storage policy waiver
+
+The inherited `MCAPSGovDeployPolicies` initiative modifies storage accounts to
+disable shared-key access. This conflicts with the accelerator's key-based
+runtime storage connections. [Workflow Service Plan hosting still requires
+storage account key access](https://learn.microsoft.com/azure/logic-apps/create-single-tenant-workflows-azure-portal#set-up-managed-identity-access-to-your-storage-account),
+even when other runtime connections use managed identity. This is a tenant
+policy compatibility issue, not another upstream template defect.
+
+The adapter runs the waiver script **after `azd provision`, before `azd deploy`**,
+when the account exists but the Logic App package has not yet been uploaded.
+It resolves the account from the pinned upstream `storage` deployment output,
+not a hardcoded generated resource name. The exemption is a child of that
+single account and exempts only `StorageAccountDisableLocalAuth` within the
+assignment configured in `deployment.json`. It does not exempt the resource
+group, subscription, public-network policy or entire initiative.
+
+The approved category is **Waiver, with no expiry**. Existing exemptions with
+different policies, category or expiry stop the run rather than being silently
+overwritten. Revisit this permanent exception through the governance process.
+The script explicitly restores key access because creating an exemption does
+not reverse an earlier policy modification. It waits up to 15 minutes for
+propagation, verifies public storage access remains disabled, and restarts the
+Logic App only when it created the waiver or repaired the account.
+Reruns reuse the same resource-scoped exemption. Permission, scope, verification
+and propagation failures stop before application deployment; no tags are used
+to bypass the policy and no permissions are self-assigned.
+
+The deployment identity needs `Microsoft.Authorization/policyExemptions/write`
+on the storage account **and**
+`Microsoft.Authorization/policyAssignments/exempt/action` on the inherited
+assignment. Workload subscription Owner alone might not supply the latter
+management-group permission. A governance administrator must authorize these
+permissions outside this workflow. The existing `demo` approval gate remains.
 
 ## Run from GitHub
 
