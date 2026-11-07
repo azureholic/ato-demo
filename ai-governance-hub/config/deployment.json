@@ -23,7 +23,7 @@
     },
     "dns": {
       "subscriptionId": "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
-      "resourceGroupName": "rg-DNS",
+      "resourceGroupName": "rg-dns",
       "location": "swedencentral",
       "zones": {
         "openai": "privatelink.openai.azure.com",

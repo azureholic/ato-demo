@@ -41,7 +41,7 @@ Initial scenario:
 | Network | `10.170.0.0/24` Italy spoke, peered both ways with platform `vnet-hub-swe` |
 | Network resource group | `rg-ai-governance-network-ita` |
 | GovHub resource group | `rg-ai-governance-ita` |
-| Private DNS | Central `rg-DNS` in the platform subscription; no Private Resolver |
+| Private DNS | Central `rg-dns` in the platform subscription; no Private Resolver |
 | Monitoring | Dedicated Log Analytics workspace |
 | Foundry backends | Poland Central (primary) and Sweden Central |
 | Shared model | `gpt-6-astra`, version `2026-09-03` |
@@ -94,7 +94,7 @@ Sweden firewall; firewall routing is not changed here.
 
 After spoke deployment, the adapter discovers **all VNets in the configured
 GovHub, platform-hub and DNS subscriptions**, deduplicates them, and deploys the
-11 configured required private DNS zones in platform `rg-DNS`. Every zone is
+11 configured required private DNS zones in platform `rg-dns`. Every zone is
 linked to every discovered VNet with autoregistration disabled. No resolver is
 deployed, and VNets must use Azure-provided DNS; discovering custom DNS stops
 the run instead of claiming that links alone resolve private endpoints.
@@ -137,9 +137,9 @@ regional capacity.
    this workflow, on the subscription selected in configuration. Provider
    registration requires `/register/action` (included in Contributor/Owner).
    The same OIDC identity also needs deployment, DNS-zone/link and peering
-   permissions in the **platform** subscription: central `rg-DNS`, the hub RG,
+   permissions in the **platform** subscription: central `rg-dns`, the hub RG,
    and permission to join each discovered VNet. It must be able to create
-   `rg-DNS` if absent. This workflow does not grant itself access.
+   `rg-dns` if absent. This workflow does not grant itself access.
 4. Delete the failed Sweden GovHub resource group yourself when ready, before
    networking discovery, so it is not included in central DNS links. This code
    contains **no resource deletion**, resource moves or soft-delete purges.

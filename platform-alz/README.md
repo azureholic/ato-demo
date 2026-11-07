@@ -34,7 +34,7 @@ bootstrap. Existing private bootstrap storage and its state are left untouched.
 
 [private-dns.bicep](config/private-dns.bicep) is a separate, reusable platform
 DNS deployment used by the [GovHub workflow](../.github/workflows/ai-governance-hub-deploy.yml).
-It creates shared zones in platform `rg-DNS` and links them to all VNets discovered
+It creates shared zones in platform `rg-dns` and links them to all VNets discovered
 in the configured platform/workload subscriptions, without a Private Resolver
 or autoregistration. This is not part of the ALZ stack deployment: keep
 `deployPrivateDnsZones: false` in the ALZ hub parameters to avoid duplicate zone
