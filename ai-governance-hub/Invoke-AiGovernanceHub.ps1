@@ -58,11 +58,23 @@ if ($revision -cne $config.upstreamRevision) {
     throw "Upstream checkout does not match $($config.upstreamRevision)."
 }
 $infraPath = Join-Path $OutputPath 'bicep\infra'
-foreach ($relativePath in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'src\usage-ingestion-logicapp\package.json') {
+foreach ($relativePath in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'bicep\infra\modules\apim\apim.bicep', 'src\usage-ingestion-logicapp\package.json') {
     if (-not (Test-Path (Join-Path $OutputPath $relativePath) -PathType Leaf)) {
         throw "Pinned upstream is missing $relativePath; review its deployment contract."
     }
 }
+
+$apimPath = Join-Path $infraPath 'modules\apim\apim.bicep'
+$apimSource = Get-Content $apimPath -Raw
+foreach ($endpoint in 'eventHubEndpoint', 'eventHubPIIEndpoint') {
+    $original = "endpointAddress: replace($endpoint, 'https://', '')"
+    if ([regex]::Matches($apimSource, [regex]::Escape($original)).Count -ne 1) {
+        throw "Unexpected upstream Event Hubs logger expression for $endpoint; review hostname handling before deploying."
+    }
+    $canonical = "endpointAddress: split(split(split($endpoint, '://')[1], '/')[0], ':')[0]"
+    $apimSource = $apimSource.Replace($original, $canonical)
+}
+Set-Content $apimPath $apimSource -NoNewline
 
 if ($config.location -eq 'italynorth') {
     $allowedLocations = "@allowed([ 'uaenorth', 'southafricanorth', 'westeurope', 'southcentralus', 'australiaeast', 'canadaeast', 'eastus', 'eastus2', 'francecentral', 'japaneast', 'northcentralus', 'swedencentral', 'switzerlandnorth', 'uksouth' ])"

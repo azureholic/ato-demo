@@ -119,6 +119,16 @@ the core moved to Italy rather than Poland; the model backends remain in Poland
 and Sweden. Availability listings are not a reservation or guarantee of live
 regional capacity.
 
+The adapter also corrects the two pinned APIM Event Hubs logger expressions on
+the runner. Namespace `serviceBusEndpoint` values are URLs such as
+`https://<namespace>.servicebus.windows.net:443/`; managed-identity loggers
+require only `<namespace>.servicebus.windows.net`. The upstream expressions
+remove the scheme but leave the port/path, which APIM rejects. The adapter
+extracts the hostname for both usage and PII loggers, preserving the namespace's
+Azure-cloud suffix and leaving managed identity credentials and RBAC unchanged.
+Each original expression must match exactly once or the run stops for review
+before deployment. This is not a DNS, peering or provider-registration workaround.
+
 ## Run from GitHub
 
 1. Review the configuration, costs, provider registration and quotas. Changing

@@ -18,12 +18,17 @@ function git {
     $global:LASTEXITCODE = 0
     if ($args[0] -eq 'clone') {
         $path = $args[-1]
-        foreach ($file in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'src\usage-ingestion-logicapp\package.json') {
+        foreach ($file in 'azure.yaml', 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep', 'bicep\infra\modules\networking\vnet.bicep', 'bicep\infra\modules\apim\apim.bicep', 'src\usage-ingestion-logicapp\package.json') {
             $destination = Join-Path $path $file
             New-Item (Split-Path $destination -Parent) -ItemType Directory -Force | Out-Null
             if ($file -in 'bicep\infra\main.bicep', 'bicep\infra\resources.bicep') {
                 $source = "@allowed([ 'uaenorth', 'southafricanorth', 'westeurope', 'southcentralus', 'australiaeast', 'canadaeast', 'eastus', 'eastus2', 'francecentral', 'japaneast', 'northcentralus', 'swedencentral', 'switzerlandnorth', 'uksouth' ])`nparam location string"
                 if ($state.Failure -eq 'changed-location-list') { $source = $source.Replace("'uaenorth'", "'eastasia'") }
+                Set-Content $destination $source
+            } elseif ($file -eq 'bicep\infra\modules\apim\apim.bicep') {
+                $source = "endpointAddress: replace(eventHubEndpoint, 'https://', '')`nendpointAddress: replace(eventHubPIIEndpoint, 'https://', '')"
+                if ($state.Failure -eq 'changed-logger-expression') { $source = $source.Replace('eventHubPIIEndpoint', 'newEndpoint') }
+                if ($state.Failure -eq 'duplicate-logger-expression') { $source += "`nendpointAddress: replace(eventHubEndpoint, 'https://', '')" }
                 Set-Content $destination $source
             } else {
                 Set-Content $destination '{}'
@@ -144,6 +149,10 @@ try {
     Assert ($copied.model.name -eq $originalConfig.model.name) 'The model configuration must accompany the parameter overlay.'
     $patched = Get-Content (Join-Path $testRoot 'validate\bicep\infra\main.bicep') -Raw
     Assert ($patched.Contains("'italynorth', 'uaenorth'")) 'Italy North must be added to the runner-only upstream location allow-list.'
+    $loggers = Get-Content (Join-Path $testRoot 'validate\bicep\infra\modules\apim\apim.bicep') -Raw
+    foreach ($endpoint in 'eventHubEndpoint', 'eventHubPIIEndpoint') {
+        Assert ($loggers.Contains("endpointAddress: split(split(split($endpoint, '://')[1], '/')[0], ':')[0]")) 'Both Event Hubs loggers must use canonical hostnames, not URLs with port/path suffixes.'
+    }
 
     Invoke-Case -Name 'network' -Mode Network
     Assert (@($state.Calls | Where-Object { $_ -like 'azd *' }).Count -eq 0) 'Network-only mode must not deploy GovHub services.'
@@ -175,6 +184,10 @@ try {
     Invoke-Case -Name 'wrong-revision' -Failure wrong-revision -ExpectedError 'does not match'
     Invoke-Case -Name 'changed-location-list' -Failure changed-location-list -ExpectedError 'Unexpected upstream location allow-list'
     Assert (@($state.Calls | Where-Object { $_ -like 'az deployment *' -or $_ -like 'azd *' }).Count -eq 0) 'Unexpected upstream regional restrictions must stop before deployment.'
+    foreach ($failure in 'changed-logger-expression', 'duplicate-logger-expression') {
+        Invoke-Case -Name $failure -Failure $failure -ExpectedError 'Unexpected upstream Event Hubs logger expression'
+        Assert (@($state.Calls | Where-Object { $_ -like 'az *' -or $_ -like 'azd *' }).Count -eq 0) 'Logger expression drift must stop before compilation or Azure changes.'
+    }
     Invoke-Case -Name 'unpinned' -ExpectedError 'full lowercase Git commit SHA'
     Assert ($state.Calls.Count -eq 0) 'An unpinned revision must fail before cloning.'
     Invoke-Case -Name 'existing' -ExpectedError 'fresh output directory'
