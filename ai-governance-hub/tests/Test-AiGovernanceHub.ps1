@@ -61,6 +61,7 @@ function git {
 function az {
     $state.Calls.Add("az $($args -join ' ')")
     $global:LASTEXITCODE = 0
+    if ($args[0] -eq 'account') { 'mock-arm-token'; return }
     if ($args[0] -eq 'storage') {
         if ($args[2] -eq 'update') {
             if ($state.Failure -ne 'waiver-propagation') { $state.SharedKey = $true }
@@ -172,6 +173,19 @@ function azd {
     }
     if ($state.Failure -eq $args[0]) { $global:LASTEXITCODE = 29 }
 }
+function Invoke-WebRequest {
+    param([string]$Uri, [string]$Method, [hashtable]$Headers, [switch]$SkipHttpErrorCheck, [int]$TimeoutSec)
+    $state.Calls.Add("GET $Uri")
+    if ($state.Failure -eq 'waiver-read') { return @{ StatusCode = 403; Content = '{}' } }
+    if ($null -eq $state.Exemption) { return @{ StatusCode = 404; Content = '{}' } }
+    if ($state.Failure -eq 'waiver-verification') {
+        $state.Exemption.policyDefinitionReferenceIds = @('StorageAccountDisableLocalAuth', 'StorageAccountPublicNetworkModify')
+    }
+    return @{
+        StatusCode = 200
+        Content = @{ id = $state.Exemption.id; properties = $state.Exemption } | ConvertTo-Json -Depth 10
+    }
+}
 function Assert {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
@@ -259,8 +273,10 @@ try {
     Assert (-not $calls[$updateIndex].Contains('--public-network-access')) 'Repair must not enable public storage access.'
 
     $state.Calls.Clear()
+    $state.Exemption.name = "$($state.StorageScope)/providers/Microsoft.Authorization/policyExemptions/govhub-logic-storage-shared-key"
     & (Join-Path $root 'Set-LogicAppStorageExemption.ps1') -ConfigPath $configPath
     Assert (@($state.Calls | Where-Object { $_ -like 'az policy exemption create *' -or $_ -like 'az storage account update *' -or $_ -like 'az webapp restart *' }).Count -eq 0) 'An existing matching waiver and healthy account must cause no writes or restarts.'
+    Assert (@($state.Calls | Where-Object { $_ -like 'az policy exemption list *' }).Count -eq 0) 'Existing waivers must be read by exact ID, independent of list naming or visibility.'
     $state.Exemption.expiresOn = '2026-12-07T23:59:59Z'
     $state.Calls.Clear()
     $caught = $null
@@ -270,14 +286,18 @@ try {
     Assert ($null -ne $caught -and $caught.Contains('review it rather than overwriting')) 'Do not silently replace an existing time-limited waiver with a permanent one.'
     Assert (@($state.Calls | Where-Object { $_ -like 'az policy exemption create *' -or $_ -like 'az storage account update *' }).Count -eq 0) 'Conflicting waivers must stop before writes.'
 
-    foreach ($failure in 'waiver-permission', 'waiver-verification', 'public-storage') {
+    foreach ($failure in 'waiver-permission', 'waiver-verification', 'waiver-read', 'public-storage') {
         $expected = switch ($failure) {
             waiver-permission { 'policyAssignments/exempt/action' }
             waiver-verification { 'review it rather than overwriting' }
+            waiver-read { 'do not treat a permission or service error as a missing waiver' }
             public-storage { 'retain disabled public network access' }
         }
         Invoke-Case -Name $failure -Failure $failure -ExpectedError $expected
         Assert (@($state.Calls | Where-Object { $_ -like 'az storage account update *' -or $_ -like 'az webapp restart *' -or $_ -like 'azd deploy *' }).Count -eq 0) 'Unsafe or unverified exemptions must stop storage changes and application deployment.'
+        if ($failure -eq 'waiver-read') {
+            Assert (@($state.Calls | Where-Object { $_ -like 'az policy exemption create *' }).Count -eq 0) 'A forbidden read must not trigger exemption creation.'
+        }
     }
     $state.Failure = 'waiver-propagation'
     $state.Exemption = $null

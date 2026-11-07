@@ -179,7 +179,10 @@ The script explicitly restores key access because creating an exemption does
 not reverse an earlier policy modification. It waits up to 15 minutes for
 propagation, verifies public storage access remains disabled, and restarts the
 Logic App only when it created the waiver or repaired the account.
-Reruns reuse the same resource-scoped exemption. Permission, scope, verification
+Reruns read the exemption directly by its exact ARM resource ID; they do not
+depend on list results. Only an explicit HTTP 404 triggers creation. Existing
+matching exemptions require read permission, not exemption write permission.
+Permission, scope, verification
 and propagation failures stop before application deployment; no tags are used
 to bypass the policy and no permissions are self-assigned.
 
@@ -189,6 +192,21 @@ on the storage account **and**
 assignment. Workload subscription Owner alone might not supply the latter
 management-group permission. A governance administrator must authorize these
 permissions outside this workflow. The existing `demo` approval gate remains.
+
+The `GitHub-ATO-Demos` identity has these administratively assigned custom roles:
+
+| Role | Actions | Assignment scope |
+| --- | --- | --- |
+| GovHub Policy Exemption Writer | Exemption read/write | GovHub workload resource group |
+| GovHub MCAPS Exemption Approver | Assignment read and `exempt/action` | The configured `MCAPSGovDeployPolicies` assignment only |
+
+These roles do not grant Owner, policy assignment edits or exemption deletion.
+Azure RBAC cannot limit `exempt/action` to one reference inside an initiative;
+the adapter still restricts every waiver to the shared-key reference and one
+runtime storage account. If the workload resource group is deleted/recreated,
+an administrator must restore its writer role assignment. Account-only
+recreation retains the resource-group grant. Allow RBAC propagation and use
+a fresh workflow login after granting permissions.
 
 ## Run from GitHub
 

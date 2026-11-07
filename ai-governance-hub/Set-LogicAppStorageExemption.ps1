@@ -73,13 +73,28 @@ function Assert-StorageExemption {
         throw 'Existing storage exemption differs from the approved single-policy, no-expiry waiver; review it rather than overwriting it.'
     }
 }
-$exemptions = @(Invoke-StorageCommand @(
-    'policy', 'exemption', 'list', '--subscription', "$subscription", '--scope', $scope, '--output', 'json'
-) | ConvertFrom-Json | Where-Object { $_.name -ceq $exemptionName })
-if ($exemptions.Count -gt 1) { throw 'Multiple runtime storage exemptions have the configured name.' }
-$created = $exemptions.Count -eq 0
+$exemptionId = "$scope/providers/Microsoft.Authorization/policyExemptions/$exemptionName"
+$token = Invoke-StorageCommand @(
+    'account', 'get-access-token', '--subscription', "$subscription",
+    '--resource', 'https://management.azure.com/', '--query', 'accessToken', '--output', 'tsv'
+)
+if ([string]::IsNullOrWhiteSpace($token)) { throw 'Unable to obtain an ARM token for storage exemption verification.' }
+function Get-StorageExemption {
+    $response = Invoke-WebRequest -Uri "https://management.azure.com${exemptionId}?api-version=2022-07-01-preview" `
+        -Method Get -Headers @{ Authorization = "Bearer $token" } -SkipHttpErrorCheck -TimeoutSec 60
+    if ($response.StatusCode -eq 404) { return $null }
+    if ($response.StatusCode -ne 200) {
+        throw "Unable to read the exact storage exemption (HTTP $($response.StatusCode)); do not treat a permission or service error as a missing waiver."
+    }
+    $document = $response.Content | ConvertFrom-Json
+    if ($document.id -ine $exemptionId) { throw 'Storage exemption verification returned an unexpected resource scope.' }
+    if ($null -eq $document.properties) { throw 'Storage exemption verification returned no properties.' }
+    return $document.properties
+}
+$existing = Get-StorageExemption
+$created = $null -eq $existing
 if (-not $created) {
-    Assert-StorageExemption $exemptions[0]
+    Assert-StorageExemption $existing
 } else {
     Invoke-StorageCommand @(
         'policy', 'exemption', 'create', '--subscription', "$subscription",
@@ -92,13 +107,8 @@ if (-not $created) {
         '--output', 'none'
     )
 }
-$verified = Invoke-StorageCommand @(
-    'policy', 'exemption', 'show', '--subscription', "$subscription",
-    '--name', $exemptionName, '--scope', $scope, '--output', 'json'
-) | ConvertFrom-Json
-if ($verified.id -ine "$scope/providers/Microsoft.Authorization/policyExemptions/$exemptionName") {
-    throw 'Storage exemption verification returned an unexpected resource scope.'
-}
+$verified = Get-StorageExemption
+if ($null -eq $verified) { throw 'The runtime storage waiver is missing after creation or verification.' }
 Assert-StorageExemption $verified
 
 # A modify policy has already changed the account; an exemption alone does not undo that change.
