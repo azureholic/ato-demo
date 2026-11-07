@@ -174,7 +174,13 @@ function Invoke-HostArm {
 }
 function Invoke-HostNativeAz {
     param([string[]]$Arguments)
-    $nativeCalls.Add(@{ Arguments = $Arguments })
+    $record = @{ Arguments = $Arguments }
+    $bodyIndex = [Array]::IndexOf($Arguments, '--body')
+    if ($bodyIndex -ge 0 -and $Arguments[$bodyIndex + 1].StartsWith('@')) {
+        $record.SerializedBody = Get-Content -LiteralPath $Arguments[$bodyIndex + 1].Substring(1) -Raw
+        $record.Body = $record.SerializedBody | ConvertFrom-Json -AsHashtable
+    }
+    $nativeCalls.Add($record)
     if ($script:cliReply) { $global:LASTEXITCODE = $cliReply.ExitCode; return $cliReply }
     Assert-Test ($Arguments[0] -eq 'account' -and $Arguments[1] -eq 'get-access-token') 'Only controller token retrieval uses CLI during Job lifecycle.'
     @{ ExitCode = 0; Text = '{"accessToken":"offlineArmToken"}' }
@@ -270,6 +276,7 @@ try {
         Assert-Test (@($calls | Where-Object Method -eq PUT).Count -eq $writes) 'Repeat bootstrap does not rewrite infrastructure.'
         Assert-Test ($dnsCalls -eq 2) 'Platform helper alone owns zones/links.'
         $p = $resources[$s.EnvironmentId].properties
+        Assert-Test (-not $p.ContainsKey('appLogsConfiguration')) 'Bootstrap itself omits unsupported literal none/no-logs configuration.'
         Assert-Test ($p.vnetConfiguration.internal -and $p.publicNetworkAccess -eq 'Disabled' -and $p.vnetConfiguration.infrastructureSubnetId -eq $s.SubnetId) 'Environment has no public access and uses reserved subnet.'
         Assert-Test ($p.workloadProfiles.Count -eq 1 -and $p.workloadProfiles[0].workloadProfileType -eq 'Consumption') 'Workload-profile Consumption supports /27 and UDRs, no dedicated Compute.'
         Assert-Test ($resources[$s.JobId].properties.configuration.triggerType -eq 'Manual' -and $resources[$s.JobId].properties.configuration.replicaRetryLimit -eq 0) 'No schedules/duplicate retries.'
@@ -284,6 +291,37 @@ try {
         $peers = @($calls | Where-Object { $_.Method -eq 'PUT' -and $_.Id -match '/virtualNetworkPeerings/' })
         Assert-Test ($peers.Count -eq 2 -and $peers[0].Id.StartsWith($s.VnetId) -and $peers[1].Id.StartsWith($s.HubId)) 'Both peering scopes.'
         foreach ($peer in $peers) { Assert-Test ($peer.Body.properties.allowForwardedTraffic -and -not $peer.Body.properties.allowGatewayTransit -and -not $peer.Body.properties.useRemoteGateways) 'Forwarding without gateway transit.' }
+    }
+    Test-Case 'Actual environment-create JSON omits unsupported literal none and preserves privacy' {
+        $script:cliReply = @{ ExitCode = 0; Text = '{}' }
+        $body = Get-HostEnvironmentBody $s
+        $null = & $script:realHostArm PUT $s.EnvironmentId '2025-07-01' $body
+        $request = $nativeCalls[0]
+        Assert-Test (-not $request.Body.properties.ContainsKey('appLogsConfiguration') -and $request.SerializedBody -notmatch '"destination"\s*:\s*"none"') 'No-logs configuration is absent/null, not the provider-rejected string none.'
+        Assert-Test ($request.Body.location -eq 'italynorth' -and $request.Body.properties.publicNetworkAccess -eq 'Disabled' -and $request.Body.properties.vnetConfiguration.internal) 'No region/public-network relaxation.'
+        Assert-Test ($request.Body.properties.vnetConfiguration.infrastructureSubnetId -eq $s.SubnetId -and $request.Body.properties.workloadProfiles[0].workloadProfileType -eq 'Consumption') 'Existing dedicated private subnet and Consumption profile preserved.'
+        Assert-Test (($request.Arguments -join ' ') -match 'api-version=2025-07-01') 'Actual request uses verified pinned API.'
+        Assert-Test (@(Get-ChildItem (Get-Location) -Filter '.ai-agent-host-*.json').Count -eq 0) 'Exact nonsecret body file cleaned up.'
+    }
+    Test-Case 'Only known credential-free environment errors expose sanitized service fields' {
+        $script:cliReply = @{ ExitCode = 1; Text = @'
+ERROR: Bad Request({"error":{"code":"InvalidRequestParameterWithDetails","message":"AppLogsConfiguration.Destination is invalid; client_secret=privateCredential ?sig=privateSas","details":[{"code":"InvalidDestination","target":"AppLogsConfiguration.Destination","message":"App Logs destination 'none' not supported. Supported values: 'log-analytics', 'azure-monitor' or none."}]}})
+'@ }
+        $body = Get-HostEnvironmentBody $s
+        $diagnostic = ''
+        try { & $script:realHostArm PUT $s.EnvironmentId '2025-07-01' $body | Out-Null } catch { $diagnostic = $_.Exception.Message }
+        Assert-Test ($diagnostic -match 'Field=AppLogsConfiguration.Destination' -and $diagnostic -match 'Detail code=InvalidDestination' -and $diagnostic -match "destination 'none' not supported") 'Public service reason and field/code become actionable.'
+        Assert-Test ($diagnostic -notmatch 'privateCredential|privateSas' -and $diagnostic -match 'REDACTED') 'Even public errors are sanitized.'
+        $body.properties.customDomainConfiguration = @{ certificatePassword = 'privateCertificate' }
+        $diagnostic = ''
+        try { & $script:realHostArm PUT $s.EnvironmentId '2025-07-01' $body | Out-Null } catch { $diagnostic = $_.Exception.Message }
+        Assert-Test ($diagnostic -match 'Inspect Azure activity logs' -and $diagnostic -notmatch 'Supported values|privateCredential|privateCertificate|Field=') 'Any extra/potentially secret property disables public message disclosure.'
+        $script:cliReply = $null
+        $httpQueue.Enqueue(@{ StatusCode = 400; Text = '{"error":{"code":"InvalidRequestParameterWithDetails","message":"privateSecretBodyEcho"}}'; Location = $null })
+        $diagnostic = ''
+        try { Invoke-HostMemoryArm PATCH $s.JobId @{ properties = @{ configuration = @{ secrets = @(@{ name = 'own'; value = 'privateSecretBodyEcho' }) } } } | Out-Null } catch { $diagnostic = $_.Exception.Message }
+        Assert-Test ($diagnostic -match 'HTTP 400' -and $diagnostic -notmatch 'privateSecretBodyEcho') 'Encrypted-secret transport never exposes service messages/bodies.'
+        Assert-Test (@(Get-ChildItem (Get-Location) -Filter '.ai-agent-host-*.json').Count -eq 0) 'No body snapshots remain.'
     }
     Test-Case 'BYO VNet and overlapping/foreign subnet protections survive replacement' {
         $resources[$s.VnetId] = @{ properties = @{ addressSpace = @{ addressPrefixes = @('10.180.0.0/21') }; subnets = @(

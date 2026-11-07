@@ -54,6 +54,7 @@ function Get-HostAzureError {
     param([string]$Text)
     $code = $null
     $message = $null
+    $details = @()
     $start = $Text.IndexOf('{')
     $end = $Text.LastIndexOf('}')
     if ($start -ge 0 -and $end -ge $start) {
@@ -62,6 +63,7 @@ function Get-HostAzureError {
             $errorObject = if ($json['error'] -is [System.Collections.IDictionary]) { $json['error'] } else { $json }
             $code = $errorObject['code']
             $message = $errorObject['message']
+            $details = @($errorObject['details'] | Where-Object { $_ -is [System.Collections.IDictionary] } | Select-Object -First 6)
         } catch { } # Unstructured stderr is never echoed or classified by message substrings.
     }
     if (-not $code -and $Text -match '^\s*(?:ERROR:\s*)?\(([A-Za-z][A-Za-z0-9_.-]{0,127})\)') { $code = $Matches[1] }
@@ -73,7 +75,32 @@ function Get-HostAzureError {
     }
     $requestId = $null
     if ($Text -match '(?im)(?:x-ms-request-id|x-ms-correlation-request-id|correlation(?:id| id))\s*[:=]\s*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})') { $requestId = $Matches[1] }
-    @{ Code = $code; Status = $status; Message = $message; RequestId = $requestId }
+    @{ Code = $code; Status = $status; Message = $message; RequestId = $requestId; Details = $details }
+}
+
+function ConvertTo-HostAzureMessage {
+    param([AllowNull()][string]$Message)
+    $message = $Message -replace '(?s)[{\[].*', '[structured payload omitted]'
+    $message = $message -replace '(?i)\b(?:request\s+(?:body|payload)|protectedParameters|sourceScript)\b.*', '[request payload omitted]'
+    ConvertTo-HostSafeText $message -Limit 512
+}
+
+function Test-HostPublicEnvironmentBody {
+    param([string]$Id, [hashtable]$Body)
+    if ($Id -notmatch '^/subscriptions/[0-9a-f-]{36}/resourceGroups/rg-ai-agent-app-ita/providers/Microsoft.App/managedEnvironments/cae-ai-agent-deploy-ita$' -or
+        $null -eq $Body -or $Body.Count -ne 3 -or $Body['location'] -ne 'italynorth') { return $false }
+    $tags = $Body['tags']; $p = $Body['properties']
+    if ($tags -isnot [System.Collections.IDictionary] -or $tags.Count -ne 1 -or $tags['deploymentHost'] -ne $script:HostOwner -or
+        $p -isnot [System.Collections.IDictionary] -or $p.Count -ne 4 -or
+        $p['publicNetworkAccess'] -ne 'Disabled' -or $p['zoneRedundant'] -isnot [bool] -or $p['zoneRedundant']) { return $false }
+    $vnet = $p['vnetConfiguration']; $profiles = $p['workloadProfiles']
+    $subnetId = "/subscriptions/$($Id.Split('/')[2])/resourceGroups/rg-ai-agent-network-ita/providers/Microsoft.Network/virtualNetworks/vnet-ai-agent-ita/subnets/snet-deployment-host"
+    if ($vnet -isnot [System.Collections.IDictionary] -or $vnet.Count -ne 2 -or $vnet['internal'] -isnot [bool] -or
+        -not $vnet['internal'] -or $vnet['infrastructureSubnetId'] -ne $subnetId -or
+        $profiles -isnot [array] -or $profiles.Count -ne 1) { return $false }
+    $profile = $profiles[0]
+    $profile -is [System.Collections.IDictionary] -and $profile.Count -eq 2 -and
+        $profile['name'] -eq 'Consumption' -and $profile['workloadProfileType'] -eq 'Consumption'
 }
 
 function Get-HostCommandContext {
@@ -97,7 +124,7 @@ function Get-HostCommandContext {
 }
 
 function Invoke-HostAz {
-    param([string[]]$Arguments, [switch]$AllowMissing)
+    param([string[]]$Arguments, [switch]$AllowMissing, [switch]$PublicEnvironmentErrors)
     $result = Invoke-HostNativeAz ($Arguments + @('--only-show-errors', '--output', 'json'))
     $text = $result.Text
     $context = Get-HostCommandContext $Arguments
@@ -115,12 +142,17 @@ function Invoke-HostAz {
         if ($errorInfo.Status) { $diagnostic += "; HTTP $($errorInfo.Status)" }
         if ($errorInfo.RequestId) { $diagnostic += "; requestId=$($errorInfo.RequestId)" }
         $diagnostic += ').'
-        # Write errors can echo submitted scripts/protected values. Show code/context,
-        # never their response message, request body or unstructured CLI stderr.
-        if ($context.Method -eq 'GET' -and $errorInfo.Message -is [string]) {
-            $message = $errorInfo.Message -replace '(?s)[{\[].*', '[structured payload omitted]'
-            $message = $message -replace '(?i)\b(?:request\s+(?:body|payload)|protectedParameters|sourceScript)\b.*', '[request payload omitted]'
-            $diagnostic += " $(ConvertTo-HostSafeText $message -Limit 512)"
+        # Only GETs and the narrowly whitelisted, credential-free environment-create
+        # body may expose sanitized structured messages. Secret writes remain opaque.
+        if (($context.Method -eq 'GET' -and $errorInfo.Message -is [string]) -or $PublicEnvironmentErrors) {
+            if ($errorInfo.Message -is [string]) { $diagnostic += " $(ConvertTo-HostAzureMessage $errorInfo.Message)" }
+            if ($PublicEnvironmentErrors) {
+                foreach ($detail in $errorInfo.Details) {
+                    if ($detail['code'] -is [string] -and $detail.code -match '^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$') { $diagnostic += " Detail code=$($detail.code)." }
+                    if ($detail['target'] -is [string] -and $detail.target -match '^[a-zA-Z][a-zA-Z0-9_.\[\]-]{0,127}$') { $diagnostic += " Field=$($detail.target)." }
+                    if ($detail['message'] -is [string]) { $diagnostic += " $(ConvertTo-HostAzureMessage $detail.message)" }
+                }
+            }
         } else { $diagnostic += ' Inspect Azure activity logs for response details.' }
         throw $diagnostic
     }
@@ -152,7 +184,8 @@ function Invoke-HostArm {
             $Body | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $bodyPath -Encoding utf8
             $arguments += @('--body', "@$bodyPath", '--headers', 'Content-Type=application/json')
         }
-        Invoke-HostAz $arguments -AllowMissing:$AllowMissing
+        $publicErrors = $Method -eq 'PUT' -and (Test-HostPublicEnvironmentBody $Id $Body)
+        Invoke-HostAz $arguments -AllowMissing:$AllowMissing -PublicEnvironmentErrors:$publicErrors
     } finally {
         if ($bodyPath -and (Test-Path -LiteralPath $bodyPath)) { Remove-Item -LiteralPath $bodyPath -Force }
     }
@@ -921,6 +954,19 @@ function Get-HostJobBody {
     }
 }
 
+function Get-HostEnvironmentBody {
+    param([hashtable]$Settings)
+    @{
+        location = $Settings.Config.location; tags = @{ deploymentHost = $script:HostOwner }
+        properties = @{
+            publicNetworkAccess = 'Disabled'; zoneRedundant = $false
+            vnetConfiguration = @{ internal = $true; infrastructureSubnetId = $Settings.SubnetId }
+            workloadProfiles = @(@{ name = 'Consumption'; workloadProfileType = 'Consumption' })
+            # The service's no-logs value is omitted/null, not destination="none".
+        }
+    }
+}
+
 function Ensure-HostJobInfrastructure {
     param([hashtable]$Settings, [switch]$ValidateOnly)
     $s = $Settings
@@ -939,15 +985,7 @@ function Ensure-HostJobInfrastructure {
     } while ($true)
     $s.ManagedIdentityObjectId = $identity.properties.principalId
     $s.ManagedIdentityClientId = $identity.properties.clientId
-    $null = Ensure-HostResource $s.EnvironmentId $script:HostAppApi @{
-        location = $s.Config.location; tags = @{ deploymentHost = $script:HostOwner }
-        properties = @{
-            publicNetworkAccess = 'Disabled'; zoneRedundant = $false
-            vnetConfiguration = @{ internal = $true; infrastructureSubnetId = $s.SubnetId }
-            workloadProfiles = @(@{ name = 'Consumption'; workloadProfileType = 'Consumption' })
-            appLogsConfiguration = @{ destination = 'none' }
-        }
-    } -ValidateOnly:$ValidateOnly
+    $null = Ensure-HostResource $s.EnvironmentId $script:HostAppApi (Get-HostEnvironmentBody $s) -ValidateOnly:$ValidateOnly
     $body = Get-HostJobBody $s $s.ManagedIdentityClientId
     $null = Ensure-HostResource $s.JobId $script:HostAppApi $body -ValidateOnly:$ValidateOnly
     $job = Invoke-HostArm GET $s.JobId $script:HostAppApi
