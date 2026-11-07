@@ -7,6 +7,8 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '..\Invoke-AiAgentHost.ps1')
 $script:readSettings = ${function:Get-HostSettings}
 $script:realSshKey = ${function:New-HostSshKey}
+$script:realHostAz = ${function:Invoke-HostAz}
+$script:realHostArm = ${function:Invoke-HostArm}
 
 $script:passed = 0
 function Assert-Test {
@@ -43,6 +45,8 @@ function Reset-TestHost {
     $script:failRunPut = $false
     $script:dnsCalls = 0
     $script:keyCalls = 0
+    $script:cliReply = @{ ExitCode = 0; Text = '{}' }
+    $script:cliInvocations = [Collections.Generic.List[hashtable]]::new()
     $script:resources[$s.HubId] = @{
         id = $s.HubId; properties = @{
             provisioningState = 'Succeeded'; addressSpace = @{ addressPrefixes = @('10.100.0.0/16') }
@@ -130,6 +134,19 @@ function Invoke-HostAz {
     if ($Arguments[1] -eq 'start') { $script:power = 'PowerState/running' }
     elseif ($Arguments[1] -eq 'deallocate') { $script:power = 'PowerState/deallocated' }
     else { throw 'Unexpected VM lifecycle command.' }
+}
+function Invoke-HostNativeAz {
+    param([string[]]$Arguments)
+    $script:cliInvocations.Add(@{ Arguments = $Arguments })
+    $script:cliReply
+}
+function Invoke-TestActualArm {
+    param([string]$Method, [string]$Id, [string]$ApiVersion, [hashtable]$Body, [switch]$AllowMissing, [string]$Query)
+    $mock = ${function:Invoke-HostAz}
+    try {
+        Set-Item Function:Invoke-HostAz -Value $script:realHostAz
+        & $script:realHostArm $Method $Id $ApiVersion $Body -AllowMissing:$AllowMissing -Query $Query
+    } finally { Set-Item Function:Invoke-HostAz -Value $mock }
 }
 function Invoke-HostDns { $script:dnsCalls++ }
 function New-HostSshKey { $script:keyCalls++; 'ssh-rsa offline-test-key' }
@@ -509,6 +526,97 @@ Test-Case 'Only the private local builder can fetch the exact public tokenizer a
     $allRules = @($collections.rules)
     Assert-Test (@($allRules | Where-Object { '10.180.3.96/27' -in $_.sourceAddresses }).Count -eq 0) 'No disabled agent-pool subnet source is required.'
     Assert-Test (@($allRules | Where-Object { '*.blob.core.windows.net' -in $_.targetFqdns }).Count -eq 0) 'No wildcard blob permission.'
+}
+
+Test-Case 'Actual az rest JSON not-found format permits initial missing Agent RG' {
+    $script:cliReply = @{ ExitCode = 1; Text = 'ERROR: Not Found({"error":{"code":"ResourceGroupNotFound","message":"Resource group could not be found."}})' }
+    $id = "/subscriptions/$($s.Config.subscriptionId)/resourceGroups/$($s.Config.resourceGroupName)"
+    $result = Invoke-TestActualArm GET $id '2022-09-01' -AllowMissing
+    Assert-Test ($null -eq $result) 'Structured ResourceGroupNotFound is recognized as absence.'
+    $arguments = $cliInvocations[0].Arguments
+    $url = $arguments[[Array]::IndexOf($arguments, '--url') + 1]
+    Assert-Test ($url -eq "https://management.azure.com${id}?api-version=2022-09-01") 'First Bootstrap GET URI preserves the full resource ID and API version.'
+}
+
+Test-Case 'Missing-resource recognition supports VM JSON and legacy CLI format' {
+    foreach ($text in @(
+        'ERROR: Not Found({"error":{"code":"ResourceNotFound","message":"VM was not found."}})',
+        'ERROR: (ResourceNotFound) VM was not found.'
+    )) {
+        $script:cliReply = @{ ExitCode = 1; Text = $text }
+        $result = Invoke-TestActualArm GET $s.VmId '2024-07-01' -AllowMissing -Query '$expand=instanceView'
+        Assert-Test ($null -eq $result) 'Known missing VM response returns absence.'
+    }
+    $arguments = $cliInvocations[0].Arguments
+    Assert-Test ($arguments[[Array]::IndexOf($arguments, '--url') + 1].EndsWith('?api-version=2024-07-01&$expand=instanceView')) 'Instance-view query is literal, not interpolated away.'
+}
+
+Test-Case 'Permission errors and misleading not-found message text are never absence' {
+    foreach ($text in @(
+        'ERROR: Forbidden({"error":{"code":"AuthorizationFailed","message":"ResourceGroupNotFound was mentioned, but caller is forbidden."}})',
+        'ERROR: Forbidden({"error":{"code":"ResourceGroupNotFound","message":"Forbidden response must not become a missing-resource fallback."}})'
+    )) {
+        $script:cliReply = @{ ExitCode = 1; Text = $text }
+        Assert-Throws { Invoke-TestActualArm GET $s.VmId '2024-07-01' -AllowMissing } 'HTTP 403'
+    }
+}
+
+Test-Case 'Empty successful GET cannot masquerade as absent resource' {
+    foreach ($text in @('', 'null')) {
+        $script:cliReply = @{ ExitCode = 0; Text = $text }
+        Assert-Throws { Invoke-TestActualArm GET $s.VmId '2024-07-01' -AllowMissing } 'empty response|invalid JSON'
+    }
+}
+
+Test-Case 'Safe diagnostics show GET target, status and code but redact credentials' {
+    $json = @{ error = @{ code = 'AuthorizationFailed'; message = 'client_secret=do-not-print; Authorization: Bearer bearer-do-not-print; ghp_githubDoNotPrint; https://example.test/?sig=sas-do-not-print' } } | ConvertTo-Json -Compress
+    $script:cliReply = @{ ExitCode = 1; Text = "ERROR: Forbidden($json)" }
+    $diagnostic = ''
+    try { Invoke-TestActualArm GET $s.VmId '2024-07-01' } catch { $diagnostic = $_.Exception.Message }
+    Assert-Test ($diagnostic -match 'ARM GET /subscriptions/' -and $diagnostic -match 'Azure code=AuthorizationFailed' -and $diagnostic -match 'HTTP 403') 'Useful request context and Azure code are surfaced.'
+    Assert-Test ($diagnostic -notmatch 'do-not-print|githubDoNotPrint' -and $diagnostic -match 'REDACTED') 'Credential fields, bearer tokens, GitHub tokens and SAS signatures are masked.'
+}
+
+Test-Case 'Write diagnostics omit echoed request payload and clean exact body file' {
+    $script:cliReply = @{ ExitCode = 1; Text = 'ERROR: Bad Request({"error":{"code":"InvalidRequestContent","message":"echoed-private-payload"}})' }
+    Assert-Throws { Invoke-TestActualArm PUT $s.VmId '2024-07-01' @{ protectedParameters = @(@{ name = 'secret'; value = 'private-request-value' }) } -AllowMissing } 'Azure code=InvalidRequestContent.*HTTP 400'
+    $arguments = $cliInvocations[0].Arguments
+    $body = $arguments[[Array]::IndexOf($arguments, '--body') + 1]
+    Assert-Test ($body.StartsWith('@') -and -not (Test-Path -LiteralPath $body.Substring(1))) 'Payload uses a file, and the exact file is cleaned even when CLI fails.'
+    $diagnostic = ''
+    try { Invoke-TestActualArm PUT $s.VmId '2024-07-01' @{} } catch { $diagnostic = $_.Exception.Message }
+    Assert-Test ($diagnostic -notmatch 'echoed-private-payload|private-request-value|protectedParameters') 'Write errors never echo script/protected payloads.'
+}
+
+Test-Case 'Not-found writes fail rather than invoking missing-resource fallback' {
+    $script:cliReply = @{ ExitCode = 1; Text = 'ERROR: Not Found({"error":{"code":"ResourceGroupNotFound","message":"Resource group could not be found."}})' }
+    Assert-Throws { Invoke-TestActualArm PUT $s.VmId '2024-07-01' @{} -AllowMissing } 'Azure code=ResourceGroupNotFound.*HTTP 404'
+}
+
+Test-Case 'Always-deallocate cleanup is a no-op only for an absent dedicated VM' {
+    Stop-HostVm $s
+    Assert-Test (@($calls | Where-Object Method -eq CLI).Count -eq 0) 'No lifecycle CLI call when dedicated VM does not exist.'
+    Assert-Test (@($calls | Where-Object Method -eq PUT).Count -eq 0) 'Cleanup never creates missing host resources.'
+}
+
+Test-Case 'Native UI and hosted runtime can reach exact MSAL identity endpoint without package access' {
+    $collections = @(Get-HostFirewallCollections $s @('10.170.0.82'))
+    $rules = @($collections.rules)
+    $identity = @($rules | Where-Object { 'login.microsoftonline.com' -in $_.targetFqdns })
+    Assert-Test ($identity.Count -eq 1 -and $identity[0].ruleType -eq 'ApplicationRule') 'One existing exact identity application rule covers native OAuth/OBO.'
+    Assert-Test ($identity[0].protocols.Count -eq 1 -and $identity[0].protocols[0].protocolType -eq 'Https' -and $identity[0].protocols[0].port -eq 443) 'Confidential OAuth stays HTTPS.'
+    # Pinned foundation agentSubnetPrefix and acaEnvironmentSubnetPrefix after the
+    # parent's existing 192.168 -> 10.180 address-plan substitution.
+    foreach ($runtimePrefix in @('10.180.0.0/24', '10.180.1.0/24')) {
+        $runtime = Get-HostCidrRange $runtimePrefix
+        $source = Get-HostCidrRange $identity[0].sourceAddresses[0]
+        Assert-Test ($source[0] -le $runtime[0] -and $source[1] -ge $runtime[1]) 'Hosted Agent and native UI subnet are included, not just deployment host.'
+        foreach ($rule in @($rules | Where-Object { $_.name -in @('deployment-host-packages', 'apt-mirrors-only', 'fixed-public-tiktoken-data', 'private-registry-https') })) {
+            $packageSource = Get-HostCidrRange $rule.sourceAddresses[0]
+            Assert-Test ($packageSource[1] -lt $runtime[0] -or $packageSource[0] -gt $runtime[1]) 'Runtime identity permission does not widen private-host package/artifact permissions.'
+        }
+    }
+    Assert-Test (@($rules | Where-Object { 'graph.microsoft.com' -in $_.targetFqdns -or '*' -in $_.targetFqdns -or 'Internet' -in $_.targetFqdns }).Count -eq 0) 'No Graph or general Internet rule was introduced.'
 }
 
 Write-Host "$script:passed offline host tests passed."

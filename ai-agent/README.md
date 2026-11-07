@@ -47,7 +47,7 @@ The single-tenant `ai-agent-demo-ui` registration and consent are ready. It expo
 
 Before first application publication:
 
-1. Register the exact frontend HTTPS callback, `https://<frontend-hostname>/auth/oauth/azure-ad/callback`, and configure the UI origin. No placeholder callback or public-client flow was enabled.
+1. Register the exact frontend HTTPS callback, `https://<frontend-hostname>/auth/oauth/azure-ad/callback`. Publication derives `CHAINLIT_URL` from that deployed frontend hostname and verifies its effective value, keeping the UI origin consistent. No placeholder callback or public-client flow was enabled.
 2. Create an expiring confidential-client credential and store it directly in the Agent Key Vault as `ui-oauth-client-secret`, together with a random `chainlit-auth-secret`. The configured URI is the planned reference, not evidence that a credential already exists. Never store their values in configuration, logs or ordinary Run Command parameters; use protected parameters for a private-host handoff.
 3. Configure upstream's UI OAuth settings with the registered client and exposed UI API scope, keeping the downstream Foundry audience separate. Add only the approved caller/source RBAC grants and verify sign-in and OBO.
 

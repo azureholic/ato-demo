@@ -24,6 +24,20 @@ function Resolve-ConfigurationPath {
     return [IO.Path]::GetFullPath((Join-Path (Split-Path $ConfigPath) $native))
 }
 
+function Get-FrontendOrigin {
+    param([hashtable] $Environment)
+    if (-not $Environment.ContainsKey('RESOURCE_TOKEN') -or -not $Environment.RESOURCE_TOKEN) {
+        throw 'Native frontend resource token is missing.'
+    }
+    $fqdn = Invoke-Tool az @('containerapp', 'show', '--subscription', $config.subscriptionId,
+        '--resource-group', $config.applicationResourceGroupName, '--name', "ca-$($Environment.RESOURCE_TOKEN)-frontend",
+        '--query', 'properties.configuration.ingress.fqdn', '-o', 'tsv')
+    if (-not $fqdn -or $fqdn -notmatch '^[a-z0-9.-]+\.azurecontainerapps\.io$') {
+        throw 'Native frontend has no valid Azure Container Apps ingress hostname.'
+    }
+    return "https://$fqdn"
+}
+
 function Get-PinnedCheckout {
     param([string] $Repository, [string] $Revision, [string] $Directory)
     if ($Revision -notmatch '^[a-f0-9]{40}$') { throw 'Use a full upstream commit, never a mutable tag.' }
@@ -350,6 +364,10 @@ try {
             }
             [Environment]::SetEnvironmentVariable($name, [string]$publishedEnvironment[$name], 'Process')
         }
+        $origin = Get-FrontendOrigin $publishedEnvironment
+        $null = Invoke-Tool az @('appconfig', 'kv', 'set', '--endpoint', $publishedEnvironment.APP_CONFIG_ENDPOINT,
+            '--auth-mode', 'login', '--label', 'agent-lz', '--key', 'CHAINLIT_URL', '--value', $origin,
+            '--yes', '--only-show-errors', '-o', 'none')
         $null = Invoke-Tool python @('-m', 'config.deployment.private_network', '--stage', 'pre-deploy')
         Set-PrivateHostedImage $checkout $publishedEnvironment $existing
         $null = Invoke-Tool azd @('deploy', '--no-prompt')
@@ -367,11 +385,13 @@ try {
         if ($environment.HOSTED_AGENT_IMAGE_VERSION -notmatch '^sha256:[a-f0-9]{64}$') {
             throw 'Published hosted-agent image must be immutable.'
         }
+        $origin = Get-FrontendOrigin $environment
         $expectedSettings = @{
             GOVHUB_ENDPOINT = $config.governance.endpoint
             GOVHUB_API_VERSION = $govhub.model.apiVersion
             CHAT_DEPLOYMENT_NAME = $govhub.model.name
             AI_FOUNDRY_PROJECT_ENDPOINT = $environment.AZURE_AI_PROJECT_ENDPOINT
+            CHAINLIT_URL = $origin
         }
         foreach ($entry in $expectedSettings.GetEnumerator()) {
             $actual = Invoke-Tool az @('appconfig', 'kv', 'show', '--endpoint', $environment.APP_CONFIG_ENDPOINT,
@@ -380,12 +400,7 @@ try {
         }
         $null = Invoke-Tool python @((Join-Path $PSScriptRoot 'Verify-GovHub.py'), '--config', $ConfigPath,
             '--governance-config', (Resolve-ConfigurationPath $config.governanceHubConfiguration))
-        $frontend = "ca-$($environment.RESOURCE_TOKEN)-frontend"
-        $fqdn = Invoke-Tool az @('containerapp', 'show', '--subscription', $config.subscriptionId,
-            '--resource-group', $config.applicationResourceGroupName, '--name', $frontend,
-            '--query', 'properties.configuration.ingress.fqdn', '-o', 'tsv')
-        if (-not $fqdn) { throw 'Published frontend has no ingress hostname.' }
-        $anonymous = Invoke-WebRequest "https://$fqdn/user" -SkipHttpErrorCheck -TimeoutSec 60
+        $anonymous = Invoke-WebRequest "$origin/user" -SkipHttpErrorCheck -TimeoutSec 60
         if ($anonymous.StatusCode -notin 401, 403) { throw 'Signed-out UI identity endpoint did not deny anonymous access.' }
         Write-Host 'Private native endpoints, immutable hosted publication, real GovHub product invocation and signed-out UI denial verified.'
     }

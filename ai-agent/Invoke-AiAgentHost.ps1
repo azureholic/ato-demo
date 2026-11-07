@@ -31,15 +31,92 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:HostOwner = 'ai-agent-private-deployment-host'
 
+function Invoke-HostNativeAz {
+    param([string[]]$Arguments)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output = & az @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    @{ Text = ($output | Out-String); ExitCode = $exitCode }
+}
+
+function Get-HostAzureError {
+    param([string]$Text)
+    $code = $null
+    $message = $null
+    $start = $Text.IndexOf('{')
+    $end = $Text.LastIndexOf('}')
+    if ($start -ge 0 -and $end -ge $start) {
+        try {
+            $json = $Text.Substring($start, $end - $start + 1) | ConvertFrom-Json -AsHashtable
+            $errorObject = if ($json['error'] -is [System.Collections.IDictionary]) { $json['error'] } else { $json }
+            $code = $errorObject['code']
+            $message = $errorObject['message']
+        } catch { } # Unstructured stderr is never echoed or classified by message substrings.
+    }
+    if (-not $code -and $Text -match '^\s*(?:ERROR:\s*)?\(([A-Za-z][A-Za-z0-9_.-]{0,127})\)') { $code = $Matches[1] }
+    if ($code -isnot [string] -or $code -notmatch '^[A-Za-z][A-Za-z0-9_.-]{0,127}$') { $code = 'UnclassifiedCliError' }
+    $status = $null
+    $statuses = @{ 'Not Found' = 404; 'Forbidden' = 403; 'Unauthorized' = 401; 'Bad Request' = 400; 'Conflict' = 409; 'Too Many Requests' = 429; 'Internal Server Error' = 500; 'Service Unavailable' = 503 }
+    if ($Text -match '(?im)^\s*(?:ERROR:\s*)?(Not Found|Forbidden|Unauthorized|Bad Request|Conflict|Too Many Requests|Internal Server Error|Service Unavailable)(?=\s*(?:\(|\r?$))') {
+        $status = $statuses[$Matches[1]]
+    }
+    $requestId = $null
+    if ($Text -match '(?im)(?:x-ms-request-id|x-ms-correlation-request-id|correlation(?:id| id))\s*[:=]\s*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})') { $requestId = $Matches[1] }
+    @{ Code = $code; Status = $status; Message = $message; RequestId = $requestId }
+}
+
+function Get-HostCommandContext {
+    param([string[]]$Arguments)
+    $method = $null
+    $target = $null
+    if ($Arguments[0] -eq 'rest') {
+        $methodIndex = [Array]::IndexOf($Arguments, '--method')
+        $urlIndex = [Array]::IndexOf($Arguments, '--url')
+        if ($methodIndex -ge 0 -and $methodIndex + 1 -lt $Arguments.Count) { $method = $Arguments[$methodIndex + 1].ToUpperInvariant() }
+        $uri = $null
+        if ($urlIndex -ge 0 -and $urlIndex + 1 -lt $Arguments.Count -and
+            [Uri]::TryCreate($Arguments[$urlIndex + 1], [UriKind]::Absolute, [ref]$uri) -and $uri.Host -eq 'management.azure.com') {
+            $target = $uri.AbsolutePath
+            if ($uri.Query -match '(?:^\?|&)api-version=([0-9-]+)') { $target += " (api-version=$($Matches[1]))" }
+        }
+    }
+    $label = if ($method) { "ARM $method" } else { "Azure CLI $($Arguments[0])" }
+    if ($target) { $label += " $target" }
+    @{ Method = $method; Label = $label }
+}
+
 function Invoke-HostAz {
     param([string[]]$Arguments, [switch]$AllowMissing)
-    $text = (& az @Arguments --only-show-errors --output json 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) {
-        if ($AllowMissing -and $text -match '\((ResourceNotFound|ResourceGroupNotFound|NotFound)\)') { return $null }
-        # Never echo request bodies, credentials or arbitrary CLI error streams.
-        throw "Azure CLI $($Arguments[0]) $($Arguments[1]) failed (exit $LASTEXITCODE). Check Azure activity logs."
+    $result = Invoke-HostNativeAz ($Arguments + @('--only-show-errors', '--output', 'json'))
+    $text = $result.Text
+    $context = Get-HostCommandContext $Arguments
+    if ($result.ExitCode -ne 0) {
+        $errorInfo = Get-HostAzureError $text
+        if ($AllowMissing -and $context.Method -eq 'GET' -and
+            $errorInfo.Code -in @('ResourceNotFound', 'ResourceGroupNotFound', 'ParentResourceNotFound', 'NotFound') -and
+            ($null -eq $errorInfo.Status -or $errorInfo.Status -eq 404)) { return $null }
+        $diagnostic = "$($context.Label) failed (exit $($result.ExitCode); Azure code=$($errorInfo.Code)"
+        if ($errorInfo.Status) { $diagnostic += "; HTTP $($errorInfo.Status)" }
+        if ($errorInfo.RequestId) { $diagnostic += "; requestId=$($errorInfo.RequestId)" }
+        $diagnostic += ').'
+        # Write errors can echo submitted scripts/protected values. Show code/context,
+        # never their response message, request body or unstructured CLI stderr.
+        if ($context.Method -eq 'GET' -and $errorInfo.Message -is [string]) {
+            $message = $errorInfo.Message -replace '(?s)[{\[].*', '[structured payload omitted]'
+            $message = $message -replace '(?i)\b(?:request\s+(?:body|payload)|protectedParameters|sourceScript)\b.*', '[request payload omitted]'
+            $diagnostic += " $(ConvertTo-HostSafeText $message -Limit 512)"
+        } else { $diagnostic += ' Inspect Azure activity logs for response details.' }
+        throw $diagnostic
     }
-    if (-not [string]::IsNullOrWhiteSpace($text)) { return ($text | ConvertFrom-Json -AsHashtable) }
+    if (-not [string]::IsNullOrWhiteSpace($text)) {
+        try {
+            $value = $text | ConvertFrom-Json -AsHashtable
+            if ($null -eq $value -and $context.Method -eq 'GET') { throw 'Empty GET response.' }
+            return $value
+        }
+        catch { throw "$($context.Label) returned invalid JSON; response omitted." }
+    }
+    if ($context.Method -eq 'GET') { throw "$($context.Label) returned an empty response; resource absence requires a definitive not-found error." }
 }
 
 function Invoke-HostArm {
@@ -733,16 +810,25 @@ pwsh -NoLogo -NoProfile -File ./ai-agent/Invoke-AiAgent.ps1 -Mode Deploy -Phase 
         Replace('__REVISION__', $Revision.ToLowerInvariant()).Replace('__PHASE__', $Phase)
 }
 
+function ConvertTo-HostSafeText {
+    param([AllowNull()][string]$Text, [int]$Limit = 4096)
+    if (-not $Text) { return '' }
+    $text = $Text -replace '(?m)^\s*::', '[workflow command suppressed] '
+    $text = $text -replace '\x1b\[[0-?]*[ -/]*[@-~]', ''
+    $text = $text -replace '[\x00-\x08\x0b-\x1f\x7f]', ''
+    $text = $text -replace 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '[REDACTED JWT]'
+    $text = $text -replace '(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----', '[REDACTED PRIVATE KEY]'
+    $text = $text -replace '(?i)\b(?:gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)\b', '[REDACTED GITHUB TOKEN]'
+    $text = $text -replace '(?i)\bBearer\s+\S+', 'Bearer [REDACTED]'
+    $text = $text -replace '(?i)((?:access[_ ]?token|refresh[_ ]?token|client[_ ]?secret|password|AccountKey|SharedAccessSignature)["'']?\s*[:=]\s*["'']?)[^"''\s,;]+', '$1[REDACTED]'
+    $text = $text -replace '(?i)([?&](?:sig|token)=)[^&\s]+', '$1[REDACTED]'
+    if ($text.Length -gt $Limit) { $text = $text.Substring($text.Length - $Limit) }
+    $text
+}
+
 function Write-HostSafeOutput {
     param([AllowNull()][string]$Text)
-    if (-not $Text) { return }
-    $text = $Text -replace '(?m)^::', '[workflow command suppressed] '
-    $text = $text -replace '\x1b\[[0-?]*[ -/]*[@-~]', ''
-    $text = $text -replace 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '[REDACTED JWT]'
-    $text = $text -replace '(?i)((?:access_token|refresh_token|client_secret|password|AccountKey|SharedAccessSignature)["'']?\s*[:=]\s*["'']?)[^"''\s,;]+', '$1[REDACTED]'
-    $text = $text -replace '(?i)([?&](?:sig|token)=)[^&\s]+', '$1[REDACTED]'
-    if ($text.Length -gt 4096) { $text = $text.Substring($text.Length - 4096) }
-    Write-Host $text
+    if ($Text) { Write-Host (ConvertTo-HostSafeText $Text) }
 }
 
 function Wait-HostRunCommand {
@@ -769,8 +855,9 @@ function Wait-HostRunCommand {
 }
 
 function Assert-HostVm {
-    param([hashtable]$Settings)
-    $vm = Invoke-HostArm GET $Settings.VmId '2024-07-01'
+    param([hashtable]$Settings, [switch]$AllowMissing)
+    $vm = Invoke-HostArm GET $Settings.VmId '2024-07-01' -AllowMissing:$AllowMissing
+    if (-not $vm) { return $null }
     Assert-HostSubset $vm @{
         tags = @{ deploymentHost = $script:HostOwner }; identity = @{ type = 'SystemAssigned' }
         properties = @{
@@ -783,7 +870,10 @@ function Assert-HostVm {
 
 function Stop-HostVm {
     param([hashtable]$Settings)
-    $null = Assert-HostVm $Settings
+    if (-not (Assert-HostVm $Settings -AllowMissing)) {
+        Write-Host "Dedicated VM does not exist: $($Settings.VmId). No deallocation operation needed."
+        return
+    }
     $null = Invoke-HostAz @('vm', 'deallocate', '--ids', $Settings.VmId, '--no-wait')
     $deadline = [DateTime]::UtcNow.AddMinutes(15)
     do {
