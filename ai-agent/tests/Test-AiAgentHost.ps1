@@ -89,6 +89,12 @@ function Reset-TestHost {
     $script:HostSensitiveValues = @()
     $env:GH_TOKEN = 'ghs_offlineToken123456'
     $global:LASTEXITCODE = 0
+    foreach ($assignment in @(Get-HostRoleScopes $s | Where-Object Role -eq $script:HostRbacAdminRole)) {
+        $grant = Get-HostRoleAssignment $assignment '11111111-2222-3333-4444-555555555555'
+        $value = Copy-TestObject $grant.Expected
+        $value.id = $grant.Id
+        $resources[$grant.Id] = $value
+    }
     $resources[$s.HubId] = @{ properties = @{ provisioningState = 'Succeeded'; addressSpace = @{ addressPrefixes = @('10.100.0.0/16') }; dhcpOptions = @{ dnsServers = @() } } }
     $firewallId = $s.HubId -replace '/virtualNetworks/[^/]+$', '/azureFirewalls/afw-hub-swe'
     $resources[$firewallId] = @{ properties = @{ firewallPolicy = @{ id = $s.FirewallPolicyId }; ipConfigurations = @(@{ properties = @{ privateIPAddress = '10.100.0.4' } }) } }
@@ -283,14 +289,63 @@ try {
         Assert-Test (@($calls | Where-Object { $_.Method -ne 'GET' -and $_.Id -match '/Microsoft.Compute/|/networkInterfaces/|/networkSecurityGroups/|/publicIPAddresses/' }).Count -eq 0) 'No VM, NIC, NSG, public IP or Run Command lifecycle.'
         Assert-Test ($nativeCalls.Count -eq 0 -and $requests.Count -eq 0) 'No Docker, Compute SKU check, token or secret provisioning during Bootstrap.'
         $roles = @($calls | Where-Object { $_.Method -eq 'PUT' -and $_.Id -match '/roleAssignments/' })
-        Assert-Test ($roles.Count -eq 7) 'Six native RG grants plus central DNS grant.'
+        Assert-Test ($roles.Count -eq 4) 'Three Contributor grants plus central DNS; conditional RBACAdmin grants are adopt-only.'
         foreach ($grant in $roles) {
             Assert-Test ($grant.Id -match '^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Authorization/roleAssignments/') 'No global/MG/Graph privileges.'
             Assert-Test ($grant.Body.properties.principalId -eq $s.ManagedIdentityObjectId) 'Only deployment UAI receives grants.'
+            Assert-Test ($grant.Body.properties.roleDefinitionId -notmatch $script:HostRbacAdminRole) 'Workflow never writes privileged RBACAdmin grants.'
         }
         $peers = @($calls | Where-Object { $_.Method -eq 'PUT' -and $_.Id -match '/virtualNetworkPeerings/' })
         Assert-Test ($peers.Count -eq 2 -and $peers[0].Id.StartsWith($s.VnetId) -and $peers[1].Id.StartsWith($s.HubId)) 'Both peering scopes.'
         foreach ($peer in $peers) { Assert-Test ($peer.Body.properties.allowForwardedTraffic -and -not $peer.Body.properties.allowGatewayTransit -and -not $peer.Body.properties.useRemoteGateways) 'Forwarding without gateway transit.' }
+    }
+    Test-Case 'Missing conditional administrator grant blocks delegation before ordinary role writes' {
+        $principalId = '11111111-2222-3333-4444-555555555555'
+        $grants = @(Get-HostRoleScopes $s | Where-Object Role -eq $script:HostRbacAdminRole | ForEach-Object { Get-HostRoleAssignment $_ $principalId })
+        $resources.Remove($grants[2].Id)
+        Assert-Throws { Ensure-HostRoles $s $principalId } 'Administrator prerequisite'
+        Assert-Test (@($calls | Where-Object Method -ne GET).Count -eq 0) 'All three exact conditional prerequisites are checked before any role creation.'
+        Assert-Test ($calls[-1].Id -eq $grants[2].Id) 'Missing exact networking RG assignment is reported, not replaced or broadened.'
+    }
+    Test-Case 'Only exact scope, principal, role and approved write/delete condition are adopted' {
+        $principalId = '11111111-2222-3333-4444-555555555555'
+        $assignment = @(Get-HostRoleScopes $s | Where-Object Role -eq $script:HostRbacAdminRole)[0]
+        $grant = Get-HostRoleAssignment $assignment $principalId
+        $original = Copy-TestObject $resources[$grant.Id]
+        foreach ($change in @(
+            @{ Field = 'principalId'; Value = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+            @{ Field = 'roleDefinitionId'; Value = ($original.properties.roleDefinitionId -replace $script:HostRbacAdminRole, '8e3af657-a8ff-443c-a75c-2fe8c4bcb635') },
+            @{ Field = 'scope'; Value = "/subscriptions/$($s.Config.subscriptionId)" },
+            @{ Field = 'principalType'; Value = 'Group' },
+            @{ Field = 'condition'; Value = $null },
+            @{ Field = 'condition'; Value = 'true' },
+            @{ Field = 'condition'; Value = $true },
+            @{ Field = 'condition'; Value = $script:HostRbacAdminCondition.Split(' AND ')[0] },
+            @{ Field = 'condition'; Value = $script:HostRbacAdminCondition.ToLowerInvariant() },
+            @{ Field = 'conditionVersion'; Value = '1.0' }
+        )) {
+            $candidate = Copy-TestObject $original
+            $candidate.properties[$change.Field] = $change.Value
+            $resources[$grant.Id] = $candidate
+            Assert-Throws { Assert-HostConditionalRbacRoles $s $principalId } 'Administrator prerequisite'
+        }
+        $candidate = Copy-TestObject $original
+        $candidate.id = "$($grant.Id)-foreign"
+        $resources[$grant.Id] = $candidate
+        Assert-Throws { Assert-HostConditionalRbacRoles $s $principalId } 'Administrator prerequisite'
+        $resources[$grant.Id] = $original
+        Ensure-HostRoles $s $principalId
+        $writes = @($calls | Where-Object Method -eq PUT)
+        Assert-Test ($writes.Count -eq 4 -and @($writes | Where-Object { $_.Body.properties.roleDefinitionId -match $script:HostRbacAdminRole }).Count -eq 0) 'Exact conditional grants are adopt-only; ordinary scoped grants still get created normally.'
+        Assert-Test (@($calls | Where-Object { $_.Method -eq 'DELETE' }).Count -eq 0) 'Mismatches never trigger deletion or permission repair.'
+    }
+    Test-Case 'Run revalidates administrator condition before creating checks or executions' {
+        Bootstrap-TestHost
+        $grant = Get-HostRoleAssignment @(Get-HostRoleScopes $s | Where-Object Role -eq $script:HostRbacAdminRole)[0] $s.ManagedIdentityObjectId
+        $resources[$grant.Id].properties.condition = 'true'
+        $writes = @($calls | Where-Object Method -ne GET).Count
+        Assert-Throws { Invoke-TestHost Run } 'Administrator prerequisite'
+        Assert-Test ($requests.Count -eq 0 -and @($calls | Where-Object Method -ne GET).Count -eq $writes) 'Revoked/weaker condition blocks native execution without side effects.'
     }
     Test-Case 'Actual ACA display-name locations permit idempotent private adoption' {
         Bootstrap-TestHost

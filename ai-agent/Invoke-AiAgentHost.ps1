@@ -20,6 +20,9 @@ registry rules and native subnet routes before Publish. Run only validates share
 ACR task platform dependencies (Storage/EventHub/KeyVault/Monitor) are NOT implicitly
 allowed: approve exact required endpoints separately; no blanket blob/service-tag rule.
 Workflow concurrency must serialize Bootstrap/Run/Cleanup for this dedicated executor.
+An authorized administrator must precreate the three RG-scoped conditional RBACAdmin
+grants. Bootstrap/Run only adopt those exact grants; the workflow never delegates
+privileged roles or changes the root identity's ABAC condition.
 #>
 [CmdletBinding()]
 param(
@@ -38,6 +41,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:HostOwner = 'ai-agent-private-deployment-host'
+$script:HostRbacAdminRole = 'f58310d9-a9f6-439a-9e8d-f62e7b41a168'
+$script:HostRbacAdminCondition = "((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAllValues:GuidNotEquals {8e3af657-a8ff-443c-a75c-2fe8c4bcb635, 18d7d88d-d35e-4fb5-a5c3-7773c20a72d9, f58310d9-a9f6-439a-9e8d-f62e7b41a168})) AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAllValues:GuidNotEquals {8e3af657-a8ff-443c-a75c-2fe8c4bcb635, 18d7d88d-d35e-4fb5-a5c3-7773c20a72d9, f58310d9-a9f6-439a-9e8d-f62e7b41a168}))"
 $script:HostAppApi = '2025-07-01'
 $script:HostSensitiveValues = @()
 $script:HostWorkerImage = 'mcr.microsoft.com/devcontainers/python:1-3.12-bookworm@sha256:7876580dc67fd460fd962f004cbeb480027e9bbc0657096f1087db11f9eaff39'
@@ -889,17 +894,45 @@ function Get-HostRoleScopes {
     # Contributor on the network RG already includes Network Contributor on this VNet.
 }
 
-function Ensure-HostRoles {
+function Get-HostRoleAssignment {
+    param([hashtable]$Assignment, [string]$PrincipalId)
+    $scope = $Assignment.Scope
+    $subscription = $scope.Split('/')[2]
+    $roleId = "/subscriptions/$subscription/providers/Microsoft.Authorization/roleDefinitions/$($Assignment.Role)"
+    $hash = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$scope|$PrincipalId|$roleId".ToLowerInvariant()))
+    $name = [guid]::new([byte[]]$hash[0..15]).ToString()
+    $expected = @{ properties = @{ principalId = $PrincipalId; roleDefinitionId = $roleId; principalType = 'ServicePrincipal' } }
+    if ($Assignment.Role -eq $script:HostRbacAdminRole) {
+        $expected.properties.scope = $scope
+        $expected.properties.condition = $script:HostRbacAdminCondition
+        $expected.properties.conditionVersion = '2.0'
+    }
+    @{ Id = "$scope/providers/Microsoft.Authorization/roleAssignments/$name"; Scope = $scope; Expected = $expected }
+}
+
+function Assert-HostConditionalRbacRoles {
     param([hashtable]$Settings, [string]$PrincipalId)
     if ($PrincipalId -notmatch '^[0-9a-fA-F-]{36}$') { throw 'Deployment UAI principalId is missing.' }
-    foreach ($assignment in @(Get-HostRoleScopes $Settings)) {
-        $scope = $assignment.Scope
-        $subscription = $scope.Split('/')[2]
-        $roleId = "/subscriptions/$subscription/providers/Microsoft.Authorization/roleDefinitions/$($assignment.Role)"
-        $hash = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("$scope|$PrincipalId|$roleId".ToLowerInvariant()))
-        $name = [guid]::new([byte[]]$hash[0..15]).ToString()
-        $id = "$scope/providers/Microsoft.Authorization/roleAssignments/$name"
-        $expected = @{ properties = @{ principalId = $PrincipalId; roleDefinitionId = $roleId; principalType = 'ServicePrincipal' } }
+    foreach ($assignment in @(Get-HostRoleScopes $Settings | Where-Object Role -eq $script:HostRbacAdminRole)) {
+        $grant = Get-HostRoleAssignment $assignment $PrincipalId
+        $existing = Invoke-HostArm GET $grant.Id '2022-04-01' -AllowMissing
+        $prerequisite = "Administrator prerequisite: precreate or correct conditional RBAC Administrator assignment $($grant.Id) for deployment UAI $PrincipalId at $($grant.Scope), using the exact approved write/delete deny-privileged condition and conditionVersion 2.0. The workflow cannot delegate this role."
+        if ($null -eq $existing -or $existing['properties'] -isnot [System.Collections.IDictionary]) { throw $prerequisite }
+        foreach ($field in @('principalId', 'roleDefinitionId', 'principalType', 'scope', 'condition', 'conditionVersion')) {
+            if ($existing.properties[$field] -isnot [string]) { throw $prerequisite }
+        }
+        if ($existing['id'] -isnot [string] -or $existing['id'] -ine $grant.Id -or $existing.properties['condition'] -cne $script:HostRbacAdminCondition -or
+            $existing.properties['conditionVersion'] -cne '2.0') { throw $prerequisite }
+        try { Assert-HostSubset $existing $grant.Expected $grant.Id } catch { throw $prerequisite }
+    }
+}
+
+function Ensure-HostRoles {
+    param([hashtable]$Settings, [string]$PrincipalId)
+    Assert-HostConditionalRbacRoles $Settings $PrincipalId
+    foreach ($assignment in @(Get-HostRoleScopes $Settings | Where-Object Role -ne $script:HostRbacAdminRole)) {
+        $grant = Get-HostRoleAssignment $assignment $PrincipalId
+        $scope = $grant.Scope; $id = $grant.Id; $expected = $grant.Expected
         $existing = Invoke-HostArm GET $id '2022-04-01' -AllowMissing
         if ($existing) { Assert-HostSubset $existing $expected } else {
             $null = Invoke-HostArm PUT $id '2022-04-01' $expected
@@ -1016,7 +1049,8 @@ function Ensure-HostJobInfrastructure {
     if ($job.identity.userAssignedIdentities.Count -ne 1 -or $job.properties.configuration['registries']) {
         throw 'Deployment Job has unexpected identity/registry credentials; refusing operation.'
     }
-    if (-not $ValidateOnly) { Ensure-HostRoles $s $s.ManagedIdentityObjectId }
+    if ($ValidateOnly) { Assert-HostConditionalRbacRoles $s $s.ManagedIdentityObjectId }
+    else { Ensure-HostRoles $s $s.ManagedIdentityObjectId }
 }
 
 function Get-HostJobExecutions {

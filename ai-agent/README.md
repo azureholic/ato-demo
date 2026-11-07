@@ -14,6 +14,8 @@ GovHub and DNS configuration remain authoritative in [ai-governance-hub](../ai-g
 
 Run [Deploy AI Agent Landing Zone](../.github/workflows/ai-agent-deploy.yml) from `main`, using the normal `demo` approval gate and existing OIDC identity. Sources are cloned at immutable pins, outside this repository.
 
+The existing workflow identity deliberately cannot delegate Owner, User Access Administrator or RBAC Administrator. Once the worker identity exists, an authorized administrator must grant it conditional RBAC Administrator on exactly the three Agent resource groups, retaining the same exclusions for privileged role assignment/deletion. Bootstrap verifies that prerequisite; do not weaken the workflow's management-group condition or grant an unconditional worker administrator role.
+
 1. Validate configuration, real SDK protocol tests and the complete pinned Bicep.
 2. Build both manifest-pinned Linux images on the GitHub-hosted Docker runner and retain checksummed same-run artifacts for one day. The builder never accesses private Azure services.
 3. Bootstrap a private Italy North Consumption Container Apps Job, hub routing, source-scoped package/artifact egress and central DNS. The Azure-triggered executor uses a managed identity, not a registered self-hosted runner or persistent GitHub token.
