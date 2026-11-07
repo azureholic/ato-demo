@@ -39,11 +39,13 @@ PY
   if [[ "$result" -eq 0 && "$diagnostic_result" -ne 0 ]]; then result=$diagnostic_result; fi
   exit "$result"
 }
-trap report EXIT
+if [[ "${1:-}" != "--tools-check" ]]; then
+  trap report EXIT
 
-if [[ ! "$ATO_REVISION" =~ ^[a-f0-9]{40}$ || ! "$ATO_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-  echo "Invalid pinned job source." >&2
-  exit 1
+  if [[ ! "$ATO_REVISION" =~ ^[a-f0-9]{40}$ || ! "$ATO_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Invalid pinned job source." >&2
+    exit 1
+  fi
 fi
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "The deployment-tools container must run as container root, without host privileges." >&2
@@ -64,7 +66,12 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   dpkg -i /tmp/microsoft-packages.deb
   rm /tmp/microsoft-packages.deb
   curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/ato-microsoft.gpg
+  chmod 0644 /usr/share/keyrings/ato-microsoft.gpg
   printf '%s\n' 'deb [arch=amd64 signed-by=/usr/share/keyrings/ato-microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ bookworm main' > /etc/apt/sources.list.d/ato-azure-cli.list
+  chmod 0644 /etc/apt/sources.list.d/ato-azure-cli.list
+  for file in /etc/apt/sources.list.d/yarn.list /etc/apt/sources.list.d/yarn.sources; do
+    if [[ -f "$file" ]]; then mv "$file" "$file.disabled"; fi
+  done
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
 fi
@@ -74,12 +81,20 @@ if ! command -v azd >/dev/null; then
   rm /tmp/ato-install-azd.sh
 fi
 az bicep install --version v0.48.1 --only-show-errors
-az login --identity --client-id "$AZURE_CLIENT_ID" --only-show-errors -o none
-az account set --subscription 9fd780c4-e4ec-4204-83b9-cedca2c91b8e
-azd auth login --managed-identity --client-id "$AZURE_CLIENT_ID" --no-prompt
 if ! az containerapp --help >/dev/null 2>&1; then
   az extension add --name containerapp --only-show-errors
 fi
+if [[ "${1:-}" == "--tools-check" ]]; then
+  pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+  az version
+  azd version
+  skopeo --version
+  echo "Pinned worker image tool bootstrap verified; no Azure authentication or deployment performed."
+  exit 0
+fi
+az login --identity --client-id "$AZURE_CLIENT_ID" --only-show-errors -o none
+az account set --subscription 9fd780c4-e4ec-4204-83b9-cedca2c91b8e
+azd auth login --managed-identity --client-id "$AZURE_CLIENT_ID" --no-prompt
 
 mkdir -p /workspace
 git clone --filter=blob:none --no-checkout "https://github.com/$ATO_REPOSITORY.git" /workspace/scenario
