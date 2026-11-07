@@ -1,0 +1,40 @@
+{
+  "upstreamRevision": "81599b31dfbaee20ebd3a6d2ba9b07dde3c31814",
+  "subscriptionId": "9fd780c4-e4ec-4204-83b9-cedca2c91b8e",
+  "location": "swedencentral",
+  "environmentName": "ai-governance-demo",
+  "resourceGroupName": "rg-ai-governance-swe",
+  "apimSku": "StandardV2",
+  "apimSkuUnits": 1,
+  "vnetAddressPrefix": "10.170.0.0/24",
+  "apimSubnetPrefix": "10.170.0.0/26",
+  "privateEndpointSubnetPrefix": "10.170.0.64/26",
+  "functionAppSubnetPrefix": "10.170.0.128/26",
+  "aiFoundryInstances": [
+    {
+      "name": "",
+      "location": "swedencentral",
+      "customSubDomainName": "",
+      "defaultProjectName": "ai-governance-project"
+    },
+    {
+      "name": "",
+      "location": "polandcentral",
+      "customSubDomainName": "",
+      "defaultProjectName": "ai-governance-project"
+    }
+  ],
+  "model": {
+    "name": "gpt-6-astra",
+    "publisher": "OpenAI",
+    "version": "2026-09-03",
+    "sku": "GlobalStandard",
+    "capacity": 10,
+    "apiVersion": "2025-04-01-preview"
+  },
+  "tags": {
+    "environment": "demo",
+    "deployed_by": "bicep",
+    "source": "AI Hub Gateway Solution Accelerator"
+  }
+}

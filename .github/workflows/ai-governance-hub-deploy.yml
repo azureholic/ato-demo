@@ -1,0 +1,95 @@
+name: Deploy AI Governance Hub
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate only, or provision infrastructure and deploy the usage Logic App
+        type: choice
+        options:
+          - Validate
+          - Deploy
+        default: Validate
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: ai-governance-hub-demo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Validate or deploy governance hub (approval required)
+    runs-on: windows-latest
+    environment: demo
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout scenario configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check deployment approval gate and identity settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Run this workflow from main only.'
+          }
+          foreach ($name in 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID') {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            $parsed = [guid]::Empty
+            if (-not [guid]::TryParse($value, [ref]$parsed) -or $parsed -eq [guid]::Empty) {
+              throw "Missing or invalid demo environment variable: $name."
+            }
+          }
+          $environmentJson = & gh api "repos/$env:GITHUB_REPOSITORY/environments/demo"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to verify the demo deployment approval gate.' }
+          $deploymentEnvironment = $environmentJson | ConvertFrom-Json
+          $reviewerRules = @($deploymentEnvironment.protection_rules | Where-Object {
+            $_.type -eq 'required_reviewers' -and @($_.reviewers).Count -gt 0
+          })
+          if ($reviewerRules.Count -eq 0) {
+            throw 'Configure required reviewers on demo before running this workflow.'
+          }
+
+      - name: Test deployment adapter
+        run: .\ai-governance-hub\tests\Test-AiGovernanceHub.ps1
+
+      - name: Install Azure Developer CLI
+        uses: Azure/setup-azd@v2.4.0
+        with:
+          version: 1.37.3
+
+      - name: Install Bicep CLI
+        run: |
+          az bicep install --version v0.48.1
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep CLI installation failed.' }
+
+      - name: Authenticate azd with existing GitHub OIDC identity
+        if: inputs.mode == 'Deploy'
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          azd config set auth.useAzCliAuth false
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to configure native azd authentication.' }
+          azd auth login --client-id $env:AZURE_CLIENT_ID --tenant-id $env:AZURE_TENANT_ID --federated-credential-provider github --no-prompt
+          if ($LASTEXITCODE -ne 0) { throw 'azd GitHub OIDC authentication failed.' }
+
+      - name: Clone pinned upstream, apply configuration and run selected mode
+        env:
+          DEPLOYMENT_MODE: ${{ inputs.mode }}
+        run: |
+          .\ai-governance-hub\Invoke-AiGovernanceHub.ps1 `
+            -OutputPath "$env:RUNNER_TEMP\ai-governance-hub" `
+            -Mode $env:DEPLOYMENT_MODE
