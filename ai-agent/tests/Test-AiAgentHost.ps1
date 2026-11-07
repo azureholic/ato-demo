@@ -292,6 +292,36 @@ try {
         Assert-Test ($peers.Count -eq 2 -and $peers[0].Id.StartsWith($s.VnetId) -and $peers[1].Id.StartsWith($s.HubId)) 'Both peering scopes.'
         foreach ($peer in $peers) { Assert-Test ($peer.Body.properties.allowForwardedTraffic -and -not $peer.Body.properties.allowGatewayTransit -and -not $peer.Body.properties.useRemoteGateways) 'Forwarding without gateway transit.' }
     }
+    Test-Case 'Actual ACA display-name locations permit idempotent private adoption' {
+        Bootstrap-TestHost
+        $writes = @($calls | Where-Object Method -ne GET).Count
+        $serviceLocation = ('{"location":"Italy North"}' | ConvertFrom-Json -AsHashtable).location
+        $resources[$s.EnvironmentId].location = $serviceLocation
+        $resources[$s.JobId].location = $serviceLocation
+        $resources[$s.IdentityId].location = " iTaLy`tNORTH "
+        $resources[$s.RouteId].location = 'ITALY NORTH'
+        Bootstrap-TestHost
+        Assert-Test (@($calls | Where-Object Method -ne GET).Count -eq $writes) 'Same regional display names do not cause writes, replacement or deletion.'
+        Assert-Test ($s.Config.location -eq 'italynorth' -and $resources[$s.EnvironmentId].properties.vnetConfiguration.internal -and $resources[$s.EnvironmentId].properties.publicNetworkAccess -eq 'Disabled') 'Canonical requested region and private configuration are unchanged.'
+        $resources[$s.EnvironmentId].properties.publicNetworkAccess = ' Enabled '
+        Assert-Throws { Bootstrap-TestHost } 'refusing to replace'
+        $resources[$s.EnvironmentId].properties.publicNetworkAccess = 'Disabled'
+        $resources[$s.EnvironmentId].tags.deploymentHost = " $script:HostOwner "
+        Assert-Throws { Bootstrap-TestHost } 'refusing to replace'
+        Assert-Throws { Assert-HostSubset @{ properties = @{ location = 'Italy North' } } @{ properties = @{ location = 'italynorth' } } -NormalizeResourceLocation } 'differs'
+        Assert-Test (@($calls | Where-Object Method -ne GET).Count -eq $writes) 'Whitespace normalization never weakens owner/private/nested-property guards.'
+    }
+    Test-Case 'Foreign regions remain fatal for environment, Job and identity adoption' {
+        Bootstrap-TestHost
+        $writes = @($calls | Where-Object Method -ne GET).Count
+        foreach ($id in @($s.EnvironmentId, $s.JobId, $s.IdentityId)) {
+            $original = $resources[$id].location
+            $resources[$id].location = ' WEST EUROPE '
+            Assert-Throws { Bootstrap-TestHost } 'location differs'
+            $resources[$id].location = $original
+        }
+        Assert-Test (@($calls | Where-Object Method -ne GET).Count -eq $writes) 'Foreign-region mismatches fail without writes, deletion or region fallback.'
+    }
     Test-Case 'Actual environment-create JSON omits unsupported literal none and preserves privacy' {
         $script:cliReply = @{ ExitCode = 0; Text = '{}' }
         $body = Get-HostEnvironmentBody $s

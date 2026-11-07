@@ -327,11 +327,16 @@ function Wait-HostResource {
 }
 
 function Assert-HostSubset {
-    param($Actual, $Expected, [string]$Path = 'resource')
+    param($Actual, $Expected, [string]$Path = 'resource', [switch]$NormalizeResourceLocation)
     if ($Expected -is [System.Collections.IDictionary]) {
         foreach ($key in $Expected.Keys) {
             if ($null -eq $Actual -or -not $Actual.Contains($key)) { throw "$Path.$key is missing; refusing to replace existing resource." }
-            Assert-HostSubset $Actual[$key] $Expected[$key] "$Path.$key"
+            if ($NormalizeResourceLocation -and $key -ceq 'location' -and $Actual[$key] -is [string] -and $Expected[$key] -is [string]) {
+                # Azure providers may return a region display name instead of its API name.
+                if (($Actual[$key] -replace '\s', '') -ine ($Expected[$key] -replace '\s', '')) {
+                    throw "$Path.$key differs; refusing to replace existing resource."
+                }
+            } else { Assert-HostSubset $Actual[$key] $Expected[$key] "$Path.$key" }
         }
     } elseif ($Expected -is [array]) {
         if (@($Actual).Count -ne $Expected.Count) { throw "$Path differs; refusing to replace existing resource." }
@@ -349,7 +354,7 @@ function Ensure-HostResource {
     param([string]$Id, [string]$ApiVersion, [hashtable]$Body, [hashtable]$Expected = $Body, [switch]$ValidateOnly)
     $existing = Invoke-HostArm GET $Id $ApiVersion -AllowMissing
     if ($existing) {
-        Assert-HostSubset $existing $Expected $Id
+        Assert-HostSubset $existing $Expected $Id -NormalizeResourceLocation
         return (Wait-HostResource $Id $ApiVersion)
     }
     if ($ValidateOnly) { throw "Required private host resource is missing: $Id. Bootstrap first." }
@@ -980,7 +985,7 @@ function Ensure-HostJobInfrastructure {
     if (-not $identity) {
         if ($ValidateOnly) { throw 'Deployment UAI missing; Bootstrap first.' }
         $null = Invoke-HostArm PUT $s.IdentityId '2023-01-31' $identityExpected
-    } else { Assert-HostSubset $identity $identityExpected }
+    } else { Assert-HostSubset $identity $identityExpected -NormalizeResourceLocation }
     $deadline = [DateTime]::UtcNow.AddMinutes(5)
     do {
         $identity = Invoke-HostArm GET $s.IdentityId '2023-01-31'
