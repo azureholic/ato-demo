@@ -45,6 +45,7 @@ function Reset-TestHost {
     $script:failRunPut = $false
     $script:dnsCalls = 0
     $script:keyCalls = 0
+    $script:skuReply = @(@{ name = $s.VmSize; resourceType = 'virtualMachines'; locations = @($s.Config.location); restrictions = @() })
     $script:cliReply = @{ ExitCode = 0; Text = '{}' }
     $script:cliInvocations = [Collections.Generic.List[hashtable]]::new()
     $global:LASTEXITCODE = 0
@@ -130,7 +131,14 @@ function Invoke-HostArm {
 function Invoke-HostAz {
     param([string[]]$Arguments, [switch]$AllowMissing)
     $script:calls.Add(@{ Method = 'CLI'; Arguments = $Arguments })
-    Assert-Test ($Arguments[0] -eq 'vm') 'Only VM lifecycle uses CLI in this mock.'
+    Assert-Test ($Arguments[0] -eq 'vm') 'Only VM lifecycle/availability uses CLI in this mock.'
+    if ($Arguments[1] -eq 'list-skus') {
+        Assert-Test ($Arguments[[Array]::IndexOf($Arguments, '--subscription') + 1] -eq $s.Config.subscriptionId) 'SKU check targets workload subscription explicitly.'
+        Assert-Test ($Arguments[[Array]::IndexOf($Arguments, '--location') + 1] -eq $s.Config.location) 'SKU check uses configured region, never a fallback.'
+        Assert-Test ($Arguments[[Array]::IndexOf($Arguments, '--resource-type') + 1] -eq 'virtualMachines') 'Only Compute VM availability is queried.'
+        Assert-Test ($Arguments[[Array]::IndexOf($Arguments, '--size') + 1] -eq $s.VmSize -and '--all' -in $Arguments) 'Exact configured size is checked including restricted SKU records.'
+        return (Copy-TestObject $script:skuReply)
+    }
     Assert-Test ($Arguments[3] -eq $s.VmId) 'Lifecycle targets exact dedicated VM.'
     if ($Arguments[1] -eq 'start') { $script:power = 'PowerState/running' }
     elseif ($Arguments[1] -eq 'deallocate') { $script:power = 'PowerState/deallocated' }
@@ -675,6 +683,65 @@ if (Test-Path Variable:LASTEXITCODE) { exit $LASTEXITCODE }
     $exitCode = $LASTEXITCODE
     Assert-Test ($exitCode -eq 0) "Expected successful Actions wrapper exit, got $exitCode. $output"
     Assert-Test ($output -match 'No deallocation operation needed') 'Child actually executed missing-VM cleanup.'
+}
+
+Test-Case 'Location-restricted selected SKU blocks Bootstrap before any resource mutation' {
+    $skuReply[0].locations = @('ItalyNorth')
+    $skuReply[0].restrictions = @(@{
+        type = 'Location'; reasonCode = 'NotAvailableForSubscription'; values = @('ItalyNorth')
+        restrictionInfo = @{ locations = @('ItalyNorth') }
+    })
+    Assert-Throws { Bootstrap-TestHost } 'Location restriction \(NotAvailableForSubscription\).*Request Italy North Microsoft.Compute'
+    Assert-Test ($calls.Count -eq 1 -and $calls[0].Method -eq 'CLI' -and $calls[0].Arguments[1] -eq 'list-skus') 'Only the read-only availability preflight ran.'
+    Assert-Test ($dnsCalls -eq 0 -and $keyCalls -eq 0) 'No DNS, network, firewall, key generation or VM mutation preceded capacity failure.'
+}
+
+Test-Case 'Zone-only restrictions do not block the explicitly nonzonal private host' {
+    $skuReply[0].restrictions = @(@{
+        type = 'Zone'; reasonCode = 'NotAvailableForSubscription'; values = @('ItalyNorth')
+        restrictionInfo = @{ locations = @('ItalyNorth'); zones = @('1', '2', '3') }
+    })
+    Bootstrap-TestHost
+    Assert-Test (-not $resources[$s.VmId].ContainsKey('zones')) 'Host deployment does not request a restricted zone.'
+    Assert-Test ($resources[$s.VmId].properties.hardwareProfile.vmSize -eq $s.VmSize) 'Availability preflight and deployed VM use the same selected SKU.'
+}
+
+Test-Case 'Unknown or unavailable SKU cannot trigger a guessed size or region fallback' {
+    $script:skuReply = @()
+    Assert-Throws { Bootstrap-TestHost } 'not returned as one exact SKU.*No other size'
+    Assert-Test ($calls.Count -eq 1) 'Unknown size blocks all mutation.'
+    $script:calls.Clear()
+    $script:skuReply = @(@{ name = $s.VmSize; resourceType = 'virtualMachines'; locations = @('swedencentral'); restrictions = @() })
+    Assert-Throws { Bootstrap-TestHost } 'not available in the explicitly configured location'
+    Assert-Test ($calls.Count -eq 1) 'Unavailable location blocks all mutation and alternative-region probes.'
+}
+
+Test-Case 'Successful exact configured SKU is used for VM creation without selecting alternatives' {
+    $s.VmSize = 'Standard_D8s_v5'
+    $script:skuReply = @(
+        @{ name = $s.VmSize; resourceType = 'virtualMachines'; locations = @('ItalyNorth'); restrictions = @() },
+        @{ name = 'Standard_D4s_v5'; resourceType = 'virtualMachines'; locations = @('ItalyNorth'); restrictions = @(@{ type = 'Location'; values = @('ItalyNorth'); reasonCode = 'NotAvailableForSubscription' }) }
+    )
+    Bootstrap-TestHost
+    Assert-Test ($resources[$s.VmId].properties.hardwareProfile.vmSize -eq 'Standard_D8s_v5') 'Configured approved size is not replaced with a hardcoded or guessed alternative.'
+    Assert-Test ($calls[0].Method -eq 'CLI' -and $calls[0].Arguments[1] -eq 'list-skus') 'Availability check precedes resource operations on successful bootstrap too.'
+}
+
+Test-Case 'Only Location restrictions applicable to this region block a nonzonal host' {
+    $skuReply[0].restrictions = @(@{ type = 'Location'; reasonCode = 'NotAvailableForSubscription'; values = @('swedencentral'); restrictionInfo = @{ locations = @('swedencentral') } })
+    Assert-HostVmAvailability $s
+    Assert-Test ($calls.Count -eq 1) 'Other-region exclusions do not cause a false Italy North block.'
+    $skuReply[0].Remove('restrictions')
+    Assert-Throws { Bootstrap-TestHost } 'no definitive restriction data'
+    Assert-Test (@($calls | Where-Object Method -eq PUT).Count -eq 0) 'Missing availability data never becomes an implicit success.'
+}
+
+Test-Case 'Unknown restriction types and unscoped Location restrictions fail closed' {
+    $skuReply[0].restrictions = @(@{ type = 'Unknown'; values = @('ItalyNorth') })
+    Assert-Throws { Bootstrap-TestHost } 'unknown restriction type'
+    $skuReply[0].restrictions = @(@{ type = 'Location'; reasonCode = 'NotAvailableForSubscription' })
+    Assert-Throws { Bootstrap-TestHost } 'blocked by a Location restriction'
+    Assert-Test (@($calls | Where-Object Method -ne CLI).Count -eq 0 -and $dnsCalls -eq 0 -and $keyCalls -eq 0) 'Ambiguous exclusions cannot cause any Bootstrap mutation.'
 }
 
 Write-Host "$script:passed offline host tests passed."

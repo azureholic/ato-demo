@@ -9,6 +9,9 @@ firewall rule collection group, and Agent forward routing. GovHub uses applicati
 SNAT for flow symmetry; its route tables and private endpoint policies are never changed.
 No existing
 firewall group is replaced. Invoke-PlatformDns.ps1 alone creates DNS zones and links.
+Bootstrap checks the exact deploymentHost.vmSize (default Standard_D4s_v5) against
+subscription/location SKU restrictions before any resource mutation. No size or region
+fallback is attempted; Compute region access is separate from unused vCPU quota.
 Run requires a full commit SHA of a PUBLIC repository and always deallocates the VM.
 Repeat Bootstrap with the GitHub identity after Provision to append discovered private
 registry rules and native subnet routes before Publish. Run only validates shared rules.
@@ -227,6 +230,8 @@ function Get-HostSettings {
     if ($config.resourceGroupName -eq $config.applicationResourceGroupName -or
         $net.resourceGroupName -in @($config.resourceGroupName, $config.applicationResourceGroupName)) { throw 'Agent resource groups must be distinct.' }
     $hostConfig = if ($config.ContainsKey('deploymentHost')) { $config.deploymentHost } else { @{} }
+    $vmSize = if ($hostConfig.ContainsKey('vmSize')) { $hostConfig.vmSize } else { 'Standard_D4s_v5' }
+    if ($vmSize -isnot [string] -or $vmSize -notmatch '^[a-zA-Z0-9_-]{1,80}$') { throw 'deploymentHost.vmSize must be an exact approved VM SKU name.' }
     $govPath = (Resolve-Path -LiteralPath (Join-Path (Split-Path $path) $config.governanceHubConfiguration)).Path
     $gov = Get-Content -LiteralPath $govPath -Raw | ConvertFrom-Json -AsHashtable
     if ($net.addressPrefix -ne '10.180.0.0/21' -or $gov.vnetAddressPrefix -ne '10.170.0.0/24' -or
@@ -247,6 +252,7 @@ function Get-HostSettings {
         GovernanceGatewayFqdn = $endpoint.Host.ToLowerInvariant()
         GovernanceDnsZoneId = "/subscriptions/$($dns.subscriptionId)/resourceGroups/$($dns.resourceGroupName)/providers/Microsoft.Network/privateDnsZones/$($dns.zones.apimGateway)"
         VmName = 'vm-ai-agent-deploy-ita'; VmId = "$rg/providers/Microsoft.Compute/virtualMachines/vm-ai-agent-deploy-ita"
+        VmSize = $vmSize
         NicId = "$rg/providers/Microsoft.Network/networkInterfaces/nic-ai-agent-deploy-ita"
         NsgId = "$rg/providers/Microsoft.Network/networkSecurityGroups/nsg-ai-agent-deploy-ita"
         RouteId = "$rg/providers/Microsoft.Network/routeTables/rt-ai-agent-deploy-ita"
@@ -255,6 +261,33 @@ function Get-HostSettings {
         Governance = $gov
         GovernanceVnetId = "/subscriptions/$($gov.subscriptionId)/resourceGroups/$($gov.networking.resourceGroupName)/providers/Microsoft.Network/virtualNetworks/$($gov.networking.vnetName)"
         FirewallPolicyId = "/subscriptions/$($net.hub.subscriptionId)/resourceGroups/$($net.hub.resourceGroupName)/providers/Microsoft.Network/firewallPolicies/afwp-alz-swe"
+    }
+}
+
+function Assert-HostVmAvailability {
+    param([hashtable]$Settings)
+    $c = $Settings.Config
+    $skus = @(Invoke-HostAz @(
+        'vm', 'list-skus', '--subscription', $c.subscriptionId, '--location', $c.location,
+        '--resource-type', 'virtualMachines', '--size', $Settings.VmSize, '--all'
+    ))
+    $selected = @($skus | Where-Object { $_['name'] -eq $Settings.VmSize -and $_['resourceType'] -eq 'virtualMachines' })
+    $context = "Private host SKU '$($Settings.VmSize)' in '$($c.location)' for subscription '$($c.subscriptionId)'"
+    $action = 'Request Italy North Microsoft.Compute regional/SKU access from Azure Support. Unused family vCPU quota does not remove subscription/location restrictions. No other size, public host or region will be selected; another private-host region requires explicit user approval.'
+    if ($selected.Count -ne 1) { throw "$context was not returned as one exact SKU. Availability is unknown; verify the configured SKU and regional Compute access. $action" }
+    $sku = $selected[0]
+    if ($c.location -notin @($sku['locations'])) { throw "$context is not available in the explicitly configured location. $action" }
+    if (-not $sku.ContainsKey('restrictions') -or $null -eq $sku['restrictions']) { throw "$context has no definitive restriction data. Availability is unknown. $action" }
+    foreach ($restriction in $sku.restrictions) {
+        # This host is deliberately nonzonal: zone-only exclusions do not prohibit it.
+        if ($restriction['type'] -eq 'Zone') { continue }
+        if ($restriction['type'] -ne 'Location') { throw "$context has an unknown restriction type; refusing to assume availability. $action" }
+        $locations = @($restriction['values'] | Where-Object { $_ })
+        if ($restriction['restrictionInfo']) { $locations += @($restriction.restrictionInfo['locations'] | Where-Object { $_ }) }
+        if ($locations.Count -eq 0 -or $c.location -in $locations) {
+            $reason = if ($restriction['reasonCode']) { $restriction.reasonCode } else { 'unspecified' }
+            throw "$context is blocked by a Location restriction ($reason). $action"
+        }
     }
 }
 
@@ -608,6 +641,7 @@ function Ensure-HostVm {
         location = $s.Config.location; tags = @{ deploymentHost = $script:HostOwner }
         identity = @{ type = 'SystemAssigned' }
         properties = @{
+            hardwareProfile = @{ vmSize = $s.VmSize }
             securityProfile = @{ securityType = 'TrustedLaunch'; uefiSettings = @{ secureBootEnabled = $true; vTpmEnabled = $true } }
             networkProfile = @{ networkInterfaces = @(@{ id = $s.NicId }) }
             osProfile = @{ linuxConfiguration = @{ disablePasswordAuthentication = $true; provisionVMAgent = $true } }
@@ -619,7 +653,6 @@ function Ensure-HostVm {
         return (Wait-HostResource $s.VmId '2024-07-01')
     }
     $body = $expected | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable
-    $body.properties.hardwareProfile = @{ vmSize = 'Standard_D4s_v5' }
     $body.properties.storageProfile = @{
         imageReference = @{ publisher = 'Canonical'; offer = 'ubuntu-24_04-lts'; sku = 'server'; version = 'latest' }
         osDisk = @{ createOption = 'FromImage'; diskSizeGB = 128; managedDisk = @{ storageAccountType = 'Premium_LRS' }; deleteOption = 'Detach' }
@@ -896,6 +929,7 @@ function Invoke-AiAgentHost {
     if ($Action -eq 'Deallocate') { Stop-HostVm $s; return }
     if (-not $s.EgressApproved) { throw 'Set deploymentHost.egressApproved=true only after approving this Bootstrap scoped firewall group and private routes.' }
     if ($Action -eq 'Bootstrap') {
+        Assert-HostVmAvailability $s
         foreach ($rg in @($s.Config.resourceGroupName, $s.Config.applicationResourceGroupName, $s.Config.networking.resourceGroupName)) {
             $id = "/subscriptions/$($s.Config.subscriptionId)/resourceGroups/$rg"
             if (-not (Invoke-HostArm GET $id '2022-09-01' -AllowMissing)) {

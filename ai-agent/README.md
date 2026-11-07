@@ -27,6 +27,12 @@ Italy North is listed in [hosted-agent region availability](https://learn.micros
 
 Italy North is not listed for `Microsoft.ContainerRegistry/registries/agentPools`. `BUILD_MODE=local` therefore uses Docker on the private VM and the private Italy registry, not public ACR Task workers. The template's supported immutable image override receives the adapted native `hosted` Docker target; no build-pool region change or network relaxation is needed.
 
+### Regional VM access prerequisite
+
+The private deployment host also requires subscription access to its VM SKU in Italy North, independently of vCPU quota. Bootstrap checks the selected size before changing resources. If Azure reports `NotAvailableForSubscription`, follow the [Azure region access request process](https://learn.microsoft.com/troubleshoot/azure/general/region-access-request-process): request Italy North access for `Standard_D4s_v5` in the configured workload subscription (one VM, four vCPUs), then rerun the workflow with its normal approval.
+
+The November 7, 2026 deployment attempt found all 1,128 Italy North VM SKUs location-restricted for this subscription, despite unused family quota. Networking and platform DNS were created, but Agent provisioning and UI credential handoff have not run. No VM-size substitution, region move or public build fallback can silently bypass this prerequisite.
+
 ## Small runner-only adapters
 
 [Invoke-AiAgent.ps1](Invoke-AiAgent.ps1) clones/configures the template and runs its native lifecycle. [Invoke-AiAgentHost.ps1](Invoke-AiAgentHost.ps1) handles the private deployment host and strict Run Command exit-code verification.
