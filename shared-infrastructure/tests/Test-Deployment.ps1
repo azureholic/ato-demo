@@ -206,3 +206,5 @@ try {
     foreach ($name in $oldRunnerSettings.Keys) { [Environment]::SetEnvironmentVariable($name, $oldRunnerSettings[$name]) }
     Remove-Item -LiteralPath $testRoot -Recurse -Force
 }
+# Expected mock command failures must not make a passing Actions step fail.
+$global:LASTEXITCODE = 0
