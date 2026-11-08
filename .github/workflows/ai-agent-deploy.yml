@@ -95,6 +95,7 @@ jobs:
       - name: Provision Bicep foundation through pinned upstream lifecycle
         env:
           HOSTED_AGENT_RESOURCE_SCOPE: ${{ vars.HOSTED_AGENT_RESOURCE_SCOPE }}
+          AZD_BICEP_TOOL_PATH: /usr/local/bin/bicep
         run: |
           .\ai-agent\Invoke-AiAgent.ps1 -Mode Deploy -OutputPath (Join-Path $env:RUNNER_TEMP 'agent-landing-zone')
       - name: Remove generated environment and credentials

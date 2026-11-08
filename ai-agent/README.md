@@ -43,7 +43,9 @@ It never deletes the shared hub, platform DNS or Governance Hub.
    to the approved delegated Foundry audience followed by `/.default`.
 4. Run [the foundation workflow](../.github/workflows/ai-agent-deploy.yml) from `main`.
    Network preparation runs on a hosted runner; Bicep and data-plane hooks run on
-   the ephemeral `private-azure` runner. Required reviewers are enforced.
+      the ephemeral `private-azure` runner. The workflow directs azd to the runner's
+      pinned Bicep binary instead of downloading another copy. Required reviewers
+      are enforced.
 
 The existing `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` variables and GitHub OIDC
 identity are reused. Authorize workload RG creation, deployment and role assignment,
