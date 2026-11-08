@@ -23,7 +23,7 @@ function git {
         $files = @{
             'Dockerfile.github' = ''
             'github-actions-runner\entrypoint.sh' = ''
-            'azure.yaml' = "run: scripts/preUp.sh`nrun: scripts/preProvision.sh`nrun: scripts/preProvision.ps1"
+            'azure.yaml' = "run: scripts/preUp.sh`nrun: scripts/preProvision.sh`nrun: scripts/preProvision.ps1`nrun: scripts/postProvision.sh`nrun: scripts/postProvision.ps1"
             'manifest.json' = '{}'
             'main.parameters.json' = '{"parameters":{"aiFoundryLocation":{"value":"${AZURE_AI_FOUNDRY_LOCATION}"}}}'
             'infra\bicep\main.bicep' = ''
@@ -102,6 +102,30 @@ try {
     & (Join-Path $repo 'ai-agent\Protect-ArmParameters.ps1') $armParametersPath
     $values = @((Get-Content $armParametersPath -Raw | ConvertFrom-Json).parameters.additionalAppConfigurationSettings.value | ForEach-Object value)
     if ($values[0] -ne '[[]' -or $values[1] -ne '[[[]' -or $values[2] -ne 'hello') { throw 'ARM setting escaping failed.' }
+    $hookRoot = Join-Path $testRoot 'post-hook'
+    $hookScripts = Join-Path $hookRoot 'scripts'
+    $hookEnv = Join-Path $hookRoot '.azure\fixture'
+    New-Item $hookScripts, $hookEnv -ItemType Directory -Force | Out-Null
+    Copy-Item (Join-Path $repo 'ai-agent\Invoke-PostProvision.ps1') $hookScripts
+    @('DEPLOY_HOSTED_AGENT="false"', 'OTHER="keep"', 'HOSTED_AGENT_PREPARED="true"') | Set-Content (Join-Path $hookEnv '.env')
+    'if ($env:DEPLOY_HOSTED_AGENT -or $env:HOSTED_AGENT_PREPARED) { exit 1 }; exit 0' | Set-Content (Join-Path $hookScripts 'postProvision.ps1')
+    @('#!/bin/bash', 'test -z "${DEPLOY_HOSTED_AGENT+x}" && test -z "${HOSTED_AGENT_PREPARED+x}"') | Set-Content (Join-Path $hookScripts 'postProvision.sh')
+    $oldEnvironmentName = $env:AZURE_ENV_NAME
+    $oldDeployHostedAgent = $env:DEPLOY_HOSTED_AGENT
+    $oldHostedAgentPrepared = $env:HOSTED_AGENT_PREPARED
+    try {
+        $env:AZURE_ENV_NAME = 'fixture'
+        $env:DEPLOY_HOSTED_AGENT = 'false'
+        $env:HOSTED_AGENT_PREPARED = 'true'
+        & pwsh -NoProfile -File (Join-Path $hookScripts 'Invoke-PostProvision.ps1')
+        if ($LASTEXITCODE -ne 0) { throw 'Postprovision wrapper did not clear obsolete process outputs.' }
+        $remaining = @(Get-Content (Join-Path $hookEnv '.env'))
+        if ($remaining.Count -ne 1 -or $remaining[0] -ne 'OTHER="keep"') { throw 'Postprovision wrapper changed unrelated azd values.' }
+    } finally {
+        $env:AZURE_ENV_NAME = $oldEnvironmentName
+        $env:DEPLOY_HOSTED_AGENT = $oldDeployHostedAgent
+        $env:HOSTED_AGENT_PREPARED = $oldHostedAgentPrepared
+    }
     $agentConfig = Get-Content (Join-Path $repo 'ai-agent\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
     $runnerConfig = Get-Content (Join-Path $repo 'github-runner\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
     $agentTargets = @($runnerConfig.targetNetworks | Where-Object {

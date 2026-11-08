@@ -73,6 +73,9 @@ Revision changes require reviewing these guards and upstream parameters.
 The preprovision hook also escapes bracket-prefixed App Configuration values in the
 generated ARM parameters; ARM resolves them back to their original values.
 The pinned non-executable POSIX preup script is invoked through `sh`.
+Before running upstream postprovision, its wrapper removes the two legacy
+hosted-agent outputs from the transient azd environment: upstream's topology
+resolver rejects them as obsolete inputs. The ARM deployment retains its outputs.
 
 Generated azd state is transient and removed by workflow cleanup. Reuse the same
 environment, resource names, application binding and pins on reruns; never run
