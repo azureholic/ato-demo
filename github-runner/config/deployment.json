@@ -8,7 +8,7 @@
   "environmentName": "cae-github-runner-swe",
   "jobName": "job-github-runner-swe",
   "registryNamePrefix": "crghrunner",
-  "keyVaultNamePrefix": "kv-ghrunner",
+  "keyVaultNamePrefix": "kv-ghrun",
   "buildPoolName": "private-build",
   "repositoryOwner": "azureholic",
   "repositoryName": "ato-demo",

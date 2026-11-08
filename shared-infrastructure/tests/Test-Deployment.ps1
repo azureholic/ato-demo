@@ -125,6 +125,21 @@ try {
     Assert-Failure { & (Join-Path $repo 'ai-agent\Invoke-AiAgent.ps1') -OutputPath (Join-Path $testRoot 'audience') -Mode Deploy } 'HOSTED_AGENT_RESOURCE_SCOPE'
     if ($calls.Count) { throw 'Missing hosted audience must fail before cloning or Azure mutations.' }
     $config = Get-Content (Join-Path $repo 'github-runner\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($invalidPrefix in 'kv-ghrunner', 'kv--bad', 'kv-bad-') {
+        $invalidConfig = $config.Clone()
+        $invalidConfig.keyVaultNamePrefix = $invalidPrefix
+        $invalidConfigPath = Join-Path $testRoot 'invalid-runner-config.json'
+        $invalidConfig | ConvertTo-Json -Depth 20 | Set-Content $invalidConfigPath
+        $calls.Clear()
+        Assert-Failure { & (Join-Path $repo 'github-runner\Invoke-GitHubRunner.ps1') -ConfigPath $invalidConfigPath -OutputPath (Join-Path $testRoot 'invalid-vault') -Mode Validate } 'Key Vault name prefix'
+        if ($calls.Count) { throw 'Invalid Key Vault prefixes must fail before cloning or Azure mutations.' }
+    }
+    $validConfig = $config.Clone()
+    $validConfig.keyVaultNamePrefix = 'kv-1234567'
+    $validConfigPath = Join-Path $testRoot 'valid-runner-config.json'
+    $validConfig | ConvertTo-Json -Depth 20 | Set-Content $validConfigPath
+    $failure = ''
+    & (Join-Path $repo 'github-runner\Invoke-GitHubRunner.ps1') -ConfigPath $validConfigPath -OutputPath (Join-Path $testRoot 'valid-vault') -Mode Validate
     $env:GITHUB_APP_ID = '123'
     $env:GITHUB_INSTALLATION_ID = '456'
     $env:GITHUB_APP_PRIVATE_KEY = 'test-fixture-key'

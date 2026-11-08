@@ -8,6 +8,9 @@ param(
 . (Join-Path $PSScriptRoot '..\shared-infrastructure\Deployment.ps1')
 $config = Read-ScenarioConfig $ConfigPath
 if ($config.location -ne 'swedencentral') { throw 'The private ACR build pool is configured for Sweden Central.' }
+if ($config.keyVaultNamePrefix -notmatch '^[A-Za-z](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,9}$') {
+    throw 'The Key Vault name prefix must start with a letter, contain at most 10 alphanumeric or nonconsecutive hyphen characters, and end with an alphanumeric character.'
+}
 if ($Mode -eq 'Deploy') {
     foreach ($name in 'GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID') {
         if ([Environment]::GetEnvironmentVariable($name) -notmatch '^[1-9][0-9]*$') { throw "Set $name using Initialize-GitHubApp.ps1." }
