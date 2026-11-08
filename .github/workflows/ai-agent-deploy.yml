@@ -92,36 +92,12 @@ jobs:
           $runner = Read-ScenarioConfig '.\github-runner\config\deployment.json'
           $outputs = Invoke-CheckedCommand az @('deployment', 'group', 'show', '--subscription', $runner.subscriptionId, '--resource-group', $runner.resourceGroupName, '--name', 'github-runner', '--query', 'properties.outputs', '--output', 'json') | ConvertFrom-Json
           .\shared-infrastructure\Test-PrivateConnectivity.ps1 -HostNames @($outputs.registryEndpoint.value, "$($outputs.keyVaultName.value).vault.azure.net")
-      - name: Install Azure CLI Container Apps extension
-        run: |
-          az extension add --name containerapp --yes --only-show-errors
-          if ($LASTEXITCODE -ne 0) { throw 'Container Apps extension installation failed.' }
-          az containerapp -h --only-show-errors | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Container Apps extension is not usable.' }
       - name: Provision Bicep foundation through pinned upstream lifecycle
         env:
           HOSTED_AGENT_RESOURCE_SCOPE: ${{ vars.HOSTED_AGENT_RESOURCE_SCOPE }}
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZD_BICEP_TOOL_PATH: /usr/local/bin/bicep
         run: |
           .\ai-agent\Invoke-AiAgent.ps1 -Mode Deploy -OutputPath (Join-Path $env:RUNNER_TEMP 'agent-landing-zone')
-      - name: Diagnose App Configuration access from the private runner
-        if: failure()
-        run: |
-          . .\shared-infrastructure\Deployment.ps1
-          $config = Read-ScenarioConfig '.\ai-agent\config\deployment.json'
-          $store = 'appcs-ai-agent-demo-itn-001'
-          $endpoint = (az appconfig show --subscription $config.subscriptionId -g $config.applicationResourceGroupName -n $store --query endpoint -o tsv)
-          "Endpoint host: $endpoint"
-          [Net.Dns]::GetHostAddresses(([uri]$endpoint).Host) | ForEach-Object { "Resolved: $_" }
-          'az appconfig kv list:'
-          az appconfig kv list --endpoint $endpoint --auth-mode login --top 1 --query '[].key' -o tsv 2>&1 | Select-Object -First 15
-          'az appconfig kv set/delete probe:'
-          az appconfig kv set --endpoint $endpoint --key ci-diagnostic --value probe --label ci-diagnostic --auth-mode login --yes -o none 2>&1 | Select-Object -First 15
-          az appconfig kv delete --endpoint $endpoint --key ci-diagnostic --label ci-diagnostic --auth-mode login --yes -o none 2>&1 | Select-Object -First 15
-          'az containerapp show:'
-          az containerapp show -g $config.applicationResourceGroupName -n ca-vrafwdfiqpuci-frontend --subscription $config.subscriptionId --query '{fqdn:properties.configuration.ingress.fqdn}' -o json 2>&1 | Select-Object -First 15
       - name: Remove generated environment and credentials
         if: always()
         run: |

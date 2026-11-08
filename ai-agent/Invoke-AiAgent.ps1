@@ -12,7 +12,7 @@ if ($Mode -eq 'Deploy' -and $env:HOSTED_AGENT_RESOURCE_SCOPE -notmatch '^[^\s]+/
     throw 'Set the approved HOSTED_AGENT_RESOURCE_SCOPE in demo environment variables before provisioning.'
 }
 Copy-PinnedUpstream $config $OutputPath
-foreach ($file in 'azure.yaml', 'manifest.json', 'main.parameters.json', 'infra\bicep\main.bicep', 'scripts\preProvision.ps1', 'scripts\postProvision.ps1') {
+foreach ($file in 'azure.yaml', 'manifest.json', 'main.parameters.json', 'infra\bicep\main.bicep', 'scripts\preProvision.ps1') {
     if (-not (Test-Path (Join-Path $OutputPath $file))) { throw "Pinned foundation is missing $file; review the upstream contract." }
 }
 
@@ -26,14 +26,12 @@ foreach ($shell in 'sh', 'ps1') {
     if ([regex]::Matches($azureYaml, [regex]::Escape($hook)).Count -ne 1) { throw "Review changed upstream $shell preprovision hook." }
     $command = if ($shell -eq 'sh') { 'scripts/preProvision.sh' } else { 'pwsh -NoProfile -File scripts/preProvision.ps1' }
     $azureYaml = $azureYaml.Replace($hook, "run: $command && pwsh -NoProfile -File scripts/Protect-ArmParameters.ps1 infra/bicep/main.parameters.json")
-    $postHook = "run: scripts/postProvision.$shell"
-    if ([regex]::Matches($azureYaml, [regex]::Escape($postHook)).Count -ne 1) { throw "Review changed upstream $shell postprovision hook." }
-    $azureYaml = $azureYaml.Replace($postHook, 'run: pwsh -NoProfile -File scripts/Invoke-PostProvision.ps1')
 }
+# This scenario provisions infrastructure only: upstream postprovision publishes application settings and roles.
+$azureYaml = [regex]::Replace($azureYaml, '(?ms)^  postprovision:\r?\n.*?(?=^  \w)', '')
+if ($azureYaml -match 'postprovision') { throw 'Review changed upstream postprovision hook.' }
 Set-Content $azureYamlPath $azureYaml -NoNewline
-foreach ($script in 'Protect-ArmParameters.ps1', 'Invoke-PostProvision.ps1') {
-    Copy-Item (Join-Path $PSScriptRoot $script) (Join-Path $OutputPath "scripts\$script")
-}
+Copy-Item (Join-Path $PSScriptRoot 'Protect-ArmParameters.ps1') (Join-Path $OutputPath 'scripts\Protect-ArmParameters.ps1')
 
 # Harden gaps in the pinned foundation only in the generated runner checkout.
 $vaultPath = Join-Path $OutputPath 'infra\bicep\modules\ai-foundry\foundry\modules\keyVault.bicep'

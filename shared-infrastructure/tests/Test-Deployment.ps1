@@ -23,12 +23,11 @@ function git {
         $files = @{
             'Dockerfile.github' = ''
             'github-actions-runner\entrypoint.sh' = ''
-            'azure.yaml' = "run: scripts/preUp.sh`nrun: scripts/preProvision.sh`nrun: scripts/preProvision.ps1`nrun: scripts/postProvision.sh`nrun: scripts/postProvision.ps1"
+            'azure.yaml' = "hooks:`n  preup:`n    posix:`n      run: scripts/preUp.sh`n  preprovision:`n    posix:`n      run: scripts/preProvision.sh`n    windows:`n      run: scripts/preProvision.ps1`n  postprovision:`n    posix:`n      run: scripts/postProvision.sh`n    windows:`n      run: scripts/postProvision.ps1`n  predeploy:`n    posix:`n      run: scripts/preDeploy.sh`n"
             'manifest.json' = '{}'
             'main.parameters.json' = '{"parameters":{"aiFoundryLocation":{"value":"${AZURE_AI_FOUNDRY_LOCATION}"}}}'
             'infra\bicep\main.bicep' = ''
             'scripts\preProvision.ps1' = ''
-            'scripts\postProvision.ps1' = ''
             'infra\bicep\modules\ai-foundry\foundry\modules\keyVault.bicep' = 'enablePurgeProtection: false'
             'infra\bicep\modules\ai-foundry\storage-account.bicep' = 'allowBlobPublicAccess: false'
             'infra\bicep\modules\application\app-configuration-store.bicep' = 'disableLocalAuth: false'
@@ -102,37 +101,6 @@ try {
     & (Join-Path $repo 'ai-agent\Protect-ArmParameters.ps1') $armParametersPath
     $values = @((Get-Content $armParametersPath -Raw | ConvertFrom-Json).parameters.additionalAppConfigurationSettings.value | ForEach-Object value)
     if ($values[0] -ne '[[]' -or $values[1] -ne '[[[]' -or $values[2] -ne 'hello') { throw 'ARM setting escaping failed.' }
-    $hookRoot = Join-Path $testRoot 'post-hook'
-    $hookScripts = Join-Path $hookRoot 'scripts'
-    $hookEnv = Join-Path $hookRoot '.azure\fixture'
-    New-Item $hookScripts, $hookEnv -ItemType Directory -Force | Out-Null
-    Copy-Item (Join-Path $repo 'ai-agent\Invoke-PostProvision.ps1') $hookScripts
-    @('DEPLOY_HOSTED_AGENT="false"', 'OTHER="keep"', 'HOSTED_AGENT_PREPARED="true"') | Set-Content (Join-Path $hookEnv '.env')
-    'if (Test-Path Env:\DEPLOY_HOSTED_AGENT) { exit 1 }; if (Test-Path Env:\HOSTED_AGENT_PREPARED) { exit 1 }; exit 0' | Set-Content (Join-Path $hookScripts 'postProvision.ps1')
-    @('#!/bin/bash', 'test -z "${DEPLOY_HOSTED_AGENT+x}" && test -z "${HOSTED_AGENT_PREPARED+x}"') | Set-Content (Join-Path $hookScripts 'postProvision.sh')
-    $oldEnvironmentName = $env:AZURE_ENV_NAME
-    $oldDeployHostedAgent = $env:DEPLOY_HOSTED_AGENT
-    $oldHostedAgentPrepared = $env:HOSTED_AGENT_PREPARED
-    $oldOidcUrl = $env:ACTIONS_ID_TOKEN_REQUEST_URL
-    try {
-        $env:ACTIONS_ID_TOKEN_REQUEST_URL = $null
-        $env:AZURE_ENV_NAME = 'fixture'
-        $env:DEPLOY_HOSTED_AGENT = 'false'
-        $env:HOSTED_AGENT_PREPARED = 'true'
-        & pwsh -NoProfile -File (Join-Path $hookScripts 'Invoke-PostProvision.ps1')
-        if ($LASTEXITCODE -ne 0) { throw 'Postprovision wrapper did not clear obsolete process outputs.' }
-        $remaining = @(Get-Content (Join-Path $hookEnv '.env'))
-        if ($remaining.Count -ne 1 -or $remaining[0] -ne 'OTHER="keep"') { throw 'Postprovision wrapper changed unrelated azd values.' }
-        $env:ACTIONS_ID_TOKEN_REQUEST_URL = 'https://127.0.0.1:1/token'
-        $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN = $null
-        & pwsh -NoProfile -File (Join-Path $hookScripts 'Invoke-PostProvision.ps1') 2>$null
-        if ($LASTEXITCODE -eq 0) { throw 'Postprovision wrapper must fail when the federated login cannot be refreshed.' }
-    } finally {
-        $env:AZURE_ENV_NAME = $oldEnvironmentName
-        $env:ACTIONS_ID_TOKEN_REQUEST_URL = $oldOidcUrl
-        $env:DEPLOY_HOSTED_AGENT = $oldDeployHostedAgent
-        $env:HOSTED_AGENT_PREPARED = $oldHostedAgentPrepared
-    }
     $agentConfig = Get-Content (Join-Path $repo 'ai-agent\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
     $binding = Get-Content (Join-Path $repo 'ai-agent\config\resource-groups.json') -Raw | ConvertFrom-Json
     if ($binding.version -ne 2 -or $binding.environment -ne $agentConfig.environmentName -or
@@ -158,6 +126,8 @@ try {
         if ($scenario -eq 'ai-agent') {
             $generatedYaml = Get-Content (Join-Path $testRoot 'ai-agent-ok\azure.yaml') -Raw
             if ($generatedYaml -notmatch 'run: sh scripts/preUp\.sh') { throw 'The upstream non-executable preup hook must run through sh.' }
+            if ($generatedYaml -match 'postprovision|postProvision') { throw 'The agent scenario must not run upstream application postprovision.' }
+            if ($generatedYaml -notmatch 'predeploy') { throw 'Only the postprovision hook may be removed.' }
         }
         $failure = 'wrong-sha'
         $calls.Clear()

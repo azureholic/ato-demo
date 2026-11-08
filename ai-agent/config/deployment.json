@@ -43,7 +43,6 @@
   },
   "environment": {
     "AGENTLZ_APP_ID": "agent-lz-default",
-    "SEARCH_SERVICE_NAME": "srch-ai-agent-demo-itn-001",
     "AZURE_PRINCIPAL_TYPE": "ServicePrincipal",
     "ORCHESTRATION_HOST": "hosted",
     "APPLICATION_MODE": "conversational",

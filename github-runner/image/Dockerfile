@@ -20,10 +20,6 @@ RUN curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/
     && curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/Azure/bicep/releases/download/v0.48.1/bicep-linux-x64" -o /usr/local/bin/bicep \
     && chmod 755 /usr/local/bin/bicep \
     && bicep --version
-ENV AZURE_EXTENSION_DIR=/usr/local/share/azure-cli-extensions
-RUN az extension add --name containerapp --yes --only-show-errors \
-    && az containerapp -h --only-show-errors > /dev/null \
-    && chmod -R a+rX "$AZURE_EXTENSION_DIR"
 COPY github-actions-runner/entrypoint.sh /home/runner/entrypoint.sh
 COPY github-actions-runner/register.py /home/runner/register.py
 RUN sed -i 's/\r$//' /home/runner/entrypoint.sh \
