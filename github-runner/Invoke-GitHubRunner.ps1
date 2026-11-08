@@ -54,7 +54,7 @@ try {
     Invoke-CheckedCommand az @('deployment', 'sub', 'create', '--subscription', $config.subscriptionId, '--location', $config.location, '--name', 'github-runner-connections', '--template-file', (Join-Path $PSScriptRoot '..\shared-infrastructure\infra\connections.bicep'), '--parameters', "@$connections", '--output', 'none')
 
     $tag = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { Invoke-CheckedCommand git @('-C', (Split-Path $PSScriptRoot -Parent), 'rev-parse', 'HEAD') }
-    $build = Invoke-CheckedCommand az @('acr', 'build', '--subscription', $config.subscriptionId, '--registry', $registry, '--agent-pool', $config.buildPoolName, '--image', "github-runner:$tag", '--file', 'Dockerfile.github', '--build-arg', "RUNNER_BASE_IMAGE=$($config.runnerBaseImage)", '--no-wait', '--output', 'json', $OutputPath) | ConvertFrom-Json
+    $build = Invoke-CheckedCommand az @('acr', 'build', '--subscription', $config.subscriptionId, '--registry', $registry, '--agent-pool', $config.buildPoolName, '--image', "github-runner:$tag", '--file', (Join-Path $OutputPath 'Dockerfile.github'), '--build-arg', "RUNNER_BASE_IMAGE=$($config.runnerBaseImage)", '--no-wait', '--output', 'json', $OutputPath) | ConvertFrom-Json
     if ([string]::IsNullOrWhiteSpace($build.runId)) { throw 'ACR returned no build run ID.' }
     $deadline = [DateTime]::UtcNow.AddMinutes(60)
     do {

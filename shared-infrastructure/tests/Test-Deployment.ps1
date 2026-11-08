@@ -59,6 +59,10 @@ function az {
         if ($args[0] -eq 'acr' -and $args[1] -eq 'build') {
             $buildContext = $args[-1]
             if (Test-Path (Join-Path $buildContext 'runner.parameters.json')) { throw 'Private key parameter file would be uploaded to ACR.' }
+            $dockerfile = $args[[array]::IndexOf($args, '--file') + 1]
+            if ($dockerfile -ne (Join-Path $buildContext 'Dockerfile.github') -or -not (Test-Path -LiteralPath $dockerfile)) {
+                throw 'ACR build must reference the Dockerfile inside the generated context.'
+            }
             '{"runId":"build123"}'
             return
         }
