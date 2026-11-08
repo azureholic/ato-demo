@@ -76,6 +76,8 @@ The pinned non-executable POSIX preup script is invoked through `sh`.
 Before running upstream postprovision, its wrapper removes the two legacy
 hosted-agent outputs from the transient azd environment: upstream's topology
 resolver rejects them as obsolete inputs. The ARM deployment retains its outputs.
+The wrapper also refreshes the Azure CLI federated login, because the GitHub OIDC
+assertion expires long before provisioning finishes.
 
 Generated azd state is transient and removed by workflow cleanup. Reuse the same
 environment, resource names, application binding and pins on reruns; never run

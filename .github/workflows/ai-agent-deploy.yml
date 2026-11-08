@@ -101,6 +101,8 @@ jobs:
       - name: Provision Bicep foundation through pinned upstream lifecycle
         env:
           HOSTED_AGENT_RESOURCE_SCOPE: ${{ vars.HOSTED_AGENT_RESOURCE_SCOPE }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZD_BICEP_TOOL_PATH: /usr/local/bin/bicep
         run: |
           .\ai-agent\Invoke-AiAgent.ps1 -Mode Deploy -OutputPath (Join-Path $env:RUNNER_TEMP 'agent-landing-zone')

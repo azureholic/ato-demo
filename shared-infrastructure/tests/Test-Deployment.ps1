@@ -113,7 +113,9 @@ try {
     $oldEnvironmentName = $env:AZURE_ENV_NAME
     $oldDeployHostedAgent = $env:DEPLOY_HOSTED_AGENT
     $oldHostedAgentPrepared = $env:HOSTED_AGENT_PREPARED
+    $oldOidcUrl = $env:ACTIONS_ID_TOKEN_REQUEST_URL
     try {
+        $env:ACTIONS_ID_TOKEN_REQUEST_URL = $null
         $env:AZURE_ENV_NAME = 'fixture'
         $env:DEPLOY_HOSTED_AGENT = 'false'
         $env:HOSTED_AGENT_PREPARED = 'true'
@@ -121,8 +123,13 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Postprovision wrapper did not clear obsolete process outputs.' }
         $remaining = @(Get-Content (Join-Path $hookEnv '.env'))
         if ($remaining.Count -ne 1 -or $remaining[0] -ne 'OTHER="keep"') { throw 'Postprovision wrapper changed unrelated azd values.' }
+        $env:ACTIONS_ID_TOKEN_REQUEST_URL = 'https://127.0.0.1:1/token'
+        $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN = $null
+        & pwsh -NoProfile -File (Join-Path $hookScripts 'Invoke-PostProvision.ps1') 2>$null
+        if ($LASTEXITCODE -eq 0) { throw 'Postprovision wrapper must fail when the federated login cannot be refreshed.' }
     } finally {
         $env:AZURE_ENV_NAME = $oldEnvironmentName
+        $env:ACTIONS_ID_TOKEN_REQUEST_URL = $oldOidcUrl
         $env:DEPLOY_HOSTED_AGENT = $oldDeployHostedAgent
         $env:HOSTED_AGENT_PREPARED = $oldHostedAgentPrepared
     }
