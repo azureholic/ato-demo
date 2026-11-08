@@ -92,6 +92,12 @@ jobs:
           $runner = Read-ScenarioConfig '.\github-runner\config\deployment.json'
           $outputs = Invoke-CheckedCommand az @('deployment', 'group', 'show', '--subscription', $runner.subscriptionId, '--resource-group', $runner.resourceGroupName, '--name', 'github-runner', '--query', 'properties.outputs', '--output', 'json') | ConvertFrom-Json
           .\shared-infrastructure\Test-PrivateConnectivity.ps1 -HostNames @($outputs.registryEndpoint.value, "$($outputs.keyVaultName.value).vault.azure.net")
+      - name: Install Azure CLI Container Apps extension
+        run: |
+          az extension add --name containerapp --yes --only-show-errors
+          if ($LASTEXITCODE -ne 0) { throw 'Container Apps extension installation failed.' }
+          az containerapp -h --only-show-errors | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Container Apps extension is not usable.' }
       - name: Provision Bicep foundation through pinned upstream lifecycle
         env:
           HOSTED_AGENT_RESOURCE_SCOPE: ${{ vars.HOSTED_AGENT_RESOURCE_SCOPE }}
