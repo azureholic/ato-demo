@@ -33,6 +33,7 @@ Invoke-ScenarioNetwork $config (Join-Path $OutputPath 'network') -ValidateOnly:(
 if ($Mode -eq 'Validate') { Write-Host 'Runner overlay and Bicep compiled; no Azure resources changed.'; return }
 $dns = Get-Content (Join-Path $PSScriptRoot '..\platform-alz\config\private-dns.json') -Raw | ConvertFrom-Json -AsHashtable
 $parameters = Join-Path $OutputPath 'runner.parameters.json'
+$registry = $null
 try {
     $values = @{
         config = $config; dns = $dns; deployJob = $false; runnerImage = ''
@@ -54,16 +55,8 @@ try {
     Invoke-CheckedCommand az @('deployment', 'sub', 'create', '--subscription', $config.subscriptionId, '--location', $config.location, '--name', 'github-runner-connections', '--template-file', (Join-Path $PSScriptRoot '..\shared-infrastructure\infra\connections.bicep'), '--parameters', "@$connections", '--output', 'none')
 
     $tag = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { Invoke-CheckedCommand git @('-C', (Split-Path $PSScriptRoot -Parent), 'rev-parse', 'HEAD') }
-    $build = Invoke-CheckedCommand az @('acr', 'build', '--subscription', $config.subscriptionId, '--registry', $registry, '--agent-pool', $config.buildPoolName, '--image', "github-runner:$tag", '--file', (Join-Path $OutputPath 'Dockerfile.github'), '--build-arg', "RUNNER_BASE_IMAGE=$($config.runnerBaseImage)", '--no-wait', '--output', 'json', $OutputPath) | ConvertFrom-Json
-    if ([string]::IsNullOrWhiteSpace($build.runId)) { throw 'ACR returned no build run ID.' }
-    $deadline = [DateTime]::UtcNow.AddMinutes(60)
-    do {
-        $run = Invoke-CheckedCommand az @('acr', 'task', 'show-run', '--subscription', $config.subscriptionId, '--registry', $registry, '--run-id', $build.runId, '--output', 'json') | ConvertFrom-Json
-        if ($run.status -eq 'Succeeded') { break }
-        if ($run.status -notin 'Queued', 'Started', 'Running') { throw "Private ACR build failed: $($run.status); inspect run $($build.runId)." }
-        if ([DateTime]::UtcNow -ge $deadline) { throw "Private ACR build timed out: $($build.runId)." }
-        Start-Sleep -Seconds 15
-    } while ($true)
+    $run = Invoke-CheckedCommand az @('acr', 'build', '--subscription', $config.subscriptionId, '--registry', $registry, '--agent-pool', $config.buildPoolName, '--image', "github-runner:$tag", '--file', (Join-Path $OutputPath 'Dockerfile.github'), '--build-arg', "RUNNER_BASE_IMAGE=$($config.runnerBaseImage)", '--timeout', '3600', '--no-logs', '--output', 'json', $OutputPath) | ConvertFrom-Json
+    if (-not $run -or $run.status -ne 'Succeeded') { throw 'Private ACR build failed or did not return a successful run.' }
     $digest = @($run.outputImages | Where-Object { $_.repository -eq 'github-runner' })[0].digest
     if ($digest -notmatch '^sha256:[0-9a-f]{64}$') { throw 'ACR build returned no immutable runner image digest.' }
     $values.deployJob = $true
@@ -75,5 +68,7 @@ try {
     Write-Host "Provisioned private runner image $($values.runnerImage). Run the private runner smoke workflow before agent provisioning."
 } finally {
     if (Test-Path $parameters) { Remove-Item $parameters -Force }
+    if ($registry) {
+        Invoke-CheckedCommand az @('acr', 'agentpool', 'update', '--subscription', $config.subscriptionId, '--registry', $registry, '--name', $config.buildPoolName, '--count', '0', '--output', 'none')
+    }
 }
-Invoke-CheckedCommand az @('acr', 'agentpool', 'update', '--subscription', $config.subscriptionId, '--registry', $registry, '--name', $config.buildPoolName, '--count', '0', '--output', 'none')

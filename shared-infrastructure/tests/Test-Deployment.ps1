@@ -63,10 +63,7 @@ function az {
             if ($dockerfile -ne (Join-Path $buildContext 'Dockerfile.github') -or -not (Test-Path -LiteralPath $dockerfile)) {
                 throw 'ACR build must reference the Dockerfile inside the generated context.'
             }
-            '{"runId":"build123"}'
-            return
-        }
-        if ($args[0] -eq 'acr' -and $args[1] -eq 'task') {
+            if ('--no-wait' -in $args -or '--no-logs' -notin $args) { throw 'ACR build must return its completed run without streaming logs.' }
             if ($failure -eq 'runner-build-failed') { '{"status":"Failed"}'; return }
             @{ status = 'Succeeded'; outputImages = @(@{ repository = 'github-runner'; digest = "sha256:$('a' * 64)" }) } | ConvertTo-Json -Depth 5
             return
@@ -159,8 +156,10 @@ try {
     if (@($calls | Where-Object { $_ -like "az acr build *--agent-pool $($config.buildPoolName) *" }).Count -ne 1) { throw 'Runner images must be built by the private ACR agent pool.' }
     if (-not @($calls | Where-Object { $_ -like 'az acr agentpool update*--count 0*' }).Count) { throw 'Successful builds must scale the pool to zero.' }
     $failure = 'runner-build-failed'
+    $calls.Clear()
     Assert-Failure { & (Join-Path $repo 'github-runner\Invoke-GitHubRunner.ps1') -OutputPath (Join-Path $testRoot 'runner-build-failed') -Mode Deploy } 'build failed'
     if (Test-Path (Join-Path $testRoot 'runner-build-failed\runner.parameters.json')) { throw 'Failed builds must remove private-key parameter files.' }
+    if (-not @($calls | Where-Object { $_ -like 'az acr agentpool update*--count 0*' }).Count) { throw 'Failed builds must scale the pool to zero.' }
     $ghCalls = [Collections.Generic.List[string]]::new()
     $secretFailure = $false
     function gh {

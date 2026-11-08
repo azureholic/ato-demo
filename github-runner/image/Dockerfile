@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 ARG AZD_VERSION=1.37.3
-RUN curl -fsSL "https://github.com/Azure/azure-dev/releases/download/azd_${AZD_VERSION}/azd-linux-amd64.tar.gz" -o /tmp/azd.tar.gz \
+RUN curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/Azure/azure-dev/releases/download/azure-dev-cli_${AZD_VERSION}/azd-linux-amd64.tar.gz" -o /tmp/azd.tar.gz \
     && tar -xzf /tmp/azd.tar.gz -C /tmp \
     && install /tmp/azd-linux-amd64 /usr/local/bin/azd \
     && rm /tmp/azd.tar.gz /tmp/azd-linux-amd64 \
