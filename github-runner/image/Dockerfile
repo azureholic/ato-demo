@@ -22,7 +22,10 @@ RUN curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/
     && bicep --version
 COPY github-actions-runner/entrypoint.sh /home/runner/entrypoint.sh
 COPY github-actions-runner/register.py /home/runner/register.py
-RUN chmod 755 /home/runner/entrypoint.sh && chown runner:runner /home/runner/entrypoint.sh /home/runner/register.py
+RUN sed -i 's/\r$//' /home/runner/entrypoint.sh \
+    && bash -n /home/runner/entrypoint.sh \
+    && chmod 755 /home/runner/entrypoint.sh \
+    && chown runner:runner /home/runner/entrypoint.sh /home/runner/register.py
 USER runner
 WORKDIR /home/runner
 ENV PATH="/home/runner/.local/bin:${PATH}" \
