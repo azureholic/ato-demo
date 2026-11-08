@@ -79,7 +79,9 @@ resolver rejects them as obsolete inputs. The ARM deployment retains its outputs
 
 Generated azd state is transient and removed by workflow cleanup. Reuse the same
 environment, resource names, application binding and pins on reruns; never run
-`azd down` as routine recovery. Future agent-image deployment is separate:
+`azd down` as routine recovery. The recorded resource-group and application
+bindings in this repository restore upstream's retargeting guard on each runner;
+do not change them to migrate existing resources. Future agent-image deployment is separate:
 clone the application source and build container images using the Sweden private ACR
 pool, not a local Docker daemon. Preserve immutable digests and the original application
 definition.

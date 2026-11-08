@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "environment": "ai-agent-demo",
+  "subscription": "9fd780c4-e4ec-4204-83b9-cedca2c91b8e",
+  "foundry": "rg-ai-agent-foundry-ita",
+  "application": "rg-ai-agent-app-ita",
+  "network": "rg-ai-agent-spoke-ita"
+}

@@ -127,6 +127,12 @@ try {
         $env:HOSTED_AGENT_PREPARED = $oldHostedAgentPrepared
     }
     $agentConfig = Get-Content (Join-Path $repo 'ai-agent\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
+    $binding = Get-Content (Join-Path $repo 'ai-agent\config\resource-groups.json') -Raw | ConvertFrom-Json
+    if ($binding.version -ne 2 -or $binding.environment -ne $agentConfig.environmentName -or
+        $binding.subscription -ne $agentConfig.subscriptionId -or $binding.foundry -ne $agentConfig.resourceGroupName -or
+        $binding.application -ne $agentConfig.applicationResourceGroupName -or $binding.network -ne $agentConfig.networking.resourceGroupName) {
+        throw 'Recorded resource-group binding must match the configured deployment targets.'
+    }
     $runnerConfig = Get-Content (Join-Path $repo 'github-runner\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
     $agentTargets = @($runnerConfig.targetNetworks | Where-Object {
         $_.subscriptionId -eq $agentConfig.subscriptionId -and

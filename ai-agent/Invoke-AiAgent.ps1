@@ -101,6 +101,9 @@ try {
     $oldPath = $env:PATH
     $env:PATH = "$(Split-Path $python -Parent)$([IO.Path]::PathSeparator)$oldPath"
     Invoke-CheckedCommand azd @('env', 'new', $config.environmentName, '--subscription', $config.subscriptionId, '--location', $config.location, '--no-prompt')
+    $binding = Join-Path $ConfigPath 'resource-groups.json'
+    if (-not (Test-Path -LiteralPath $binding -PathType Leaf)) { throw 'The recorded resource-group binding is required for ephemeral runners.' }
+    Copy-Item -LiteralPath $binding -Destination (Join-Path $OutputPath ".azure\$($config.environmentName)\resource-groups.json")
     $environment = $config.environment.Clone()
     $environment.AZURE_RESOURCE_GROUP = $config.resourceGroupName
     $environment.AZURE_APP_RESOURCE_GROUP = $config.applicationResourceGroupName

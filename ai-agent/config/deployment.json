@@ -42,6 +42,7 @@
     "existingPrivateDnsZoneAppInsightsResourceId": "appInsights"
   },
   "environment": {
+    "AGENTLZ_APP_ID": "agent-lz-default",
     "AZURE_PRINCIPAL_TYPE": "ServicePrincipal",
     "ORCHESTRATION_HOST": "hosted",
     "APPLICATION_MODE": "conversational",
