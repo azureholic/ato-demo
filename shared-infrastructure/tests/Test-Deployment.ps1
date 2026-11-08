@@ -108,7 +108,7 @@ try {
     New-Item $hookScripts, $hookEnv -ItemType Directory -Force | Out-Null
     Copy-Item (Join-Path $repo 'ai-agent\Invoke-PostProvision.ps1') $hookScripts
     @('DEPLOY_HOSTED_AGENT="false"', 'OTHER="keep"', 'HOSTED_AGENT_PREPARED="true"') | Set-Content (Join-Path $hookEnv '.env')
-    'if ($env:DEPLOY_HOSTED_AGENT -or $env:HOSTED_AGENT_PREPARED) { exit 1 }; exit 0' | Set-Content (Join-Path $hookScripts 'postProvision.ps1')
+    'if (Test-Path Env:\DEPLOY_HOSTED_AGENT) { exit 1 }; if (Test-Path Env:\HOSTED_AGENT_PREPARED) { exit 1 }; exit 0' | Set-Content (Join-Path $hookScripts 'postProvision.ps1')
     @('#!/bin/bash', 'test -z "${DEPLOY_HOSTED_AGENT+x}" && test -z "${HOSTED_AGENT_PREPARED+x}"') | Set-Content (Join-Path $hookScripts 'postProvision.sh')
     $oldEnvironmentName = $env:AZURE_ENV_NAME
     $oldDeployHostedAgent = $env:DEPLOY_HOSTED_AGENT

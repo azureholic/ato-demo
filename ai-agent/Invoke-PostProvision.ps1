@@ -9,7 +9,7 @@ $legacyOutputs = @('DEPLOY_HOSTED_AGENT', 'HOSTED_AGENT_PREPARED')
 foreach ($key in $legacyOutputs) {
     if (@($lines | Where-Object { $_ -match "^$key=" }).Count -gt 1) { throw "Duplicate azd output $key." }
     $lines = @($lines | Where-Object { $_ -notmatch "^$key=" })
-    [Environment]::SetEnvironmentVariable($key, $null, 'Process')
+    if (Test-Path "Env:\$key") { Remove-Item "Env:\$key" }
 }
 [IO.File]::WriteAllLines($path, $lines, [Text.UTF8Encoding]::new($false))
 if ($IsWindows) {
