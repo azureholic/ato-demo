@@ -23,7 +23,7 @@ function git {
         $files = @{
             'Dockerfile.github' = ''
             'github-actions-runner\entrypoint.sh' = ''
-            'azure.yaml' = "run: scripts/preProvision.sh`nrun: scripts/preProvision.ps1"
+            'azure.yaml' = "run: scripts/preUp.sh`nrun: scripts/preProvision.sh`nrun: scripts/preProvision.ps1"
             'manifest.json' = '{}'
             'main.parameters.json' = '{"parameters":{"aiFoundryLocation":{"value":"${AZURE_AI_FOUNDRY_LOCATION}"}}}'
             'infra\bicep\main.bicep' = ''
@@ -118,6 +118,10 @@ try {
         $script = Join-Path $repo "$scenario\$(if ($scenario -eq 'ai-agent') { 'Invoke-AiAgent.ps1' } else { 'Invoke-GitHubRunner.ps1' })"
         $failure = ''
         & $script -OutputPath (Join-Path $testRoot "$scenario-ok") -Mode Validate
+        if ($scenario -eq 'ai-agent') {
+            $generatedYaml = Get-Content (Join-Path $testRoot 'ai-agent-ok\azure.yaml') -Raw
+            if ($generatedYaml -notmatch 'run: sh scripts/preUp\.sh') { throw 'The upstream non-executable preup hook must run through sh.' }
+        }
         $failure = 'wrong-sha'
         $calls.Clear()
         Assert-Failure { & $script -OutputPath (Join-Path $testRoot "$scenario-sha") -Mode Validate } 'pinned SHA'

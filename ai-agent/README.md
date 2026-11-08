@@ -70,6 +70,7 @@ App Configuration local-auth disablement. Solution Storage uses its native param
 Revision changes require reviewing these guards and upstream parameters.
 The preprovision hook also escapes bracket-prefixed App Configuration values in the
 generated ARM parameters; ARM resolves them back to their original values.
+The pinned non-executable POSIX preup script is invoked through `sh`.
 
 Generated azd state is transient and removed by workflow cleanup. Reuse the same
 environment, resource names, application binding and pins on reruns; never run

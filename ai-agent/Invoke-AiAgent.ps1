@@ -18,6 +18,9 @@ foreach ($file in 'azure.yaml', 'manifest.json', 'main.parameters.json', 'infra\
 
 $azureYamlPath = Join-Path $OutputPath 'azure.yaml'
 $azureYaml = Get-Content $azureYamlPath -Raw
+$preUpHook = 'run: scripts/preUp.sh'
+if ([regex]::Matches($azureYaml, [regex]::Escape($preUpHook)).Count -ne 1) { throw 'Review changed upstream preup hook.' }
+$azureYaml = $azureYaml.Replace($preUpHook, 'run: sh scripts/preUp.sh')
 foreach ($shell in 'sh', 'ps1') {
     $hook = "run: scripts/preProvision.$shell"
     if ([regex]::Matches($azureYaml, [regex]::Escape($hook)).Count -ne 1) { throw "Review changed upstream $shell preprovision hook." }
