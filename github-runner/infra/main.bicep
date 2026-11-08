@@ -235,7 +235,7 @@ resource job 'Microsoft.App/jobs@2025-01-01' = if (deployJob) {
                 runnerScope: 'repo'
                 repos: config.repositoryName
                 labels: config.runnerLabel
-                noDefaultLabels: 'true'
+                noDefaultLabels: 'false'
                 targetWorkflowQueueLength: '1'
                 applicationID: githubAppId
                 installationID: githubInstallationId
