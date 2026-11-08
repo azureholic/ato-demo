@@ -1,0 +1,17 @@
+{
+  "subscriptionId": "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
+  "resourceGroupName": "rg-hub-swe",
+  "firewallPolicyName": "afwp-alz-swe",
+  "sourceAddresses": ["10.180.0.0/21", "10.190.0.0/23"],
+  "serviceTags": ["AzureActiveDirectory", "AzureKeyVault", "Storage", "EventHub", "AzureMonitor", "MicrosoftContainerRegistry", "AzureFrontDoor.FirstParty"],
+  "fqdns": [
+    "github.com", "*.github.com", "api.github.com", "codeload.github.com",
+    "*.githubusercontent.com", "ghcr.io", "*.ghcr.io", "pkg-containers.githubusercontent.com",
+    "mcr.microsoft.com", "*.data.mcr.microsoft.com", "packages.microsoft.com",
+    "cli.github.com", "aka.ms", "azd.azureedge.net", "azdversioncheck.blob.core.windows.net",
+    "management.azure.com", "*.management.azure.com", "login.microsoftonline.com",
+    "pypi.org", "*.pypi.org", "files.pythonhosted.org", "bootstrap.pypa.io",
+    "registry.npmjs.org", "nodejs.org", "*.ubuntu.com", "ppa.launchpadcontent.net",
+    "openaipublic.blob.core.windows.net"
+  ]
+}

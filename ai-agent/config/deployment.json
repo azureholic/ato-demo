@@ -1,0 +1,73 @@
+{
+  "upstreamRepository": "https://github.com/Azure/agent-landing-zone.git",
+  "upstreamRevision": "a75485015afeddc8b9221538778ef918718ed51f",
+  "subscriptionId": "9fd780c4-e4ec-4204-83b9-cedca2c91b8e",
+  "location": "italynorth",
+  "environmentName": "ai-agent-demo",
+  "resourceGroupName": "rg-ai-agent-foundry-ita",
+  "applicationResourceGroupName": "rg-ai-agent-app-ita",
+  "networking": {
+    "resourceGroupName": "rg-ai-agent-spoke-ita",
+    "vnetName": "vnet-ai-agent-spoke-ita",
+    "addressPrefix": "10.180.0.0/21",
+    "egressNextHopIp": "10.100.0.4",
+    "hub": {
+      "subscriptionId": "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
+      "resourceGroupName": "rg-hub-swe",
+      "vnetName": "vnet-hub-swe"
+    },
+    "subnets": [
+      { "name": "agent-subnet", "addressPrefix": "10.180.0.0/24", "delegation": "Microsoft.App/environments", "serviceEndpoints": ["Microsoft.CognitiveServices"] },
+      { "name": "aca-environment-subnet", "addressPrefix": "10.180.1.0/24", "delegation": "Microsoft.App/environments", "serviceEndpoints": ["Microsoft.AzureCosmosDB"] },
+      { "name": "pe-subnet", "addressPrefix": "10.180.2.0/26", "delegation": "", "serviceEndpoints": ["Microsoft.AzureCosmosDB"] },
+      { "name": "application-pe-subnet", "addressPrefix": "10.180.3.128/26", "delegation": "", "serviceEndpoints": [] },
+      { "name": "snet-deployment-host", "addressPrefix": "10.180.6.0/27", "delegation": "Microsoft.App/environments", "serviceEndpoints": [] }
+    ]
+  },
+  "dnsZoneParameters": {
+    "existingPrivateDnsZoneCogSvcsResourceId": "cognitiveServices",
+    "existingPrivateDnsZoneOpenAiResourceId": "openai",
+    "existingPrivateDnsZoneAiServicesResourceId": "aiServices",
+    "existingPrivateDnsZoneSearchResourceId": "search",
+    "existingPrivateDnsZoneCosmosResourceId": "cosmosDb",
+    "existingPrivateDnsZoneBlobResourceId": "storageBlob",
+    "existingPrivateDnsZoneKeyVaultResourceId": "keyVault",
+    "existingPrivateDnsZoneAppConfigResourceId": "appConfig",
+    "existingPrivateDnsZoneContainerAppsResourceId": "containerAppsItaly",
+    "existingPrivateDnsZoneAcrResourceId": "containerRegistry",
+    "existingPrivateDnsZoneAzureMonitorResourceId": "azureMonitor",
+    "existingPrivateDnsZoneOmsOpsInsightsResourceId": "omsOpsInsights",
+    "existingPrivateDnsZoneOdsOpsInsightsResourceId": "odsOpsInsights",
+    "existingPrivateDnsZoneAzureAutomationResourceId": "azureAutomation",
+    "existingPrivateDnsZoneAppInsightsResourceId": "appInsights"
+  },
+  "environment": {
+    "ORCHESTRATION_HOST": "hosted",
+    "APPLICATION_MODE": "conversational",
+    "NETWORK_ISOLATION": "true",
+    "DEPLOYMENT_MODE": "ailz-integrated",
+    "USE_EXISTING_VNET": "true",
+    "DEPLOY_SUBNETS": "false",
+    "SIDE_BY_SIDE": "false",
+    "POLICY_MANAGED_PRIVATE_DNS": "false",
+    "USE_UAI": "true",
+    "DEPLOY_AZURE_FIREWALL": "false",
+    "DEPLOY_BASTION": "false",
+    "DEPLOY_NAT_GATEWAY": "false",
+    "DEPLOY_JUMPBOX": "false",
+    "DEPLOY_VM": "false",
+    "DEPLOY_SOFTWARE": "false",
+    "DEPLOY_VM_KEY_VAULT": "false",
+    "DEPLOY_ACR_TASK_AGENT_POOL": "false",
+    "HUB_INTEGRATION_CREATE_HUB_PEERING": "false",
+    "DEPLOY_INGESTION_CONTAINER_APP": "false",
+    "RUN_FROM_JUMPBOX": "true",
+    "AZURE_SKIP_NETWORK_ISOLATION_WARNING": "false",
+    "RESOURCE_NAMING_MODE": "caf",
+    "CAF_WORKLOAD_NAME": "ai-agent",
+    "CAF_ENVIRONMENT_NAME": "demo",
+    "CAF_REGION_NAME": "itn",
+    "CAF_INSTANCE": "001"
+  },
+  "tags": { "environment": "demo", "deployed_by": "bicep", "source": "Agent Landing Zone" }
+}

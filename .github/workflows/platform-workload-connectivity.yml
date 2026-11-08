@@ -1,0 +1,49 @@
+name: Provision platform workload DNS and egress
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: alz-demo-platform
+  cancel-in-progress: false
+
+jobs:
+  connectivity:
+    runs-on: windows-latest
+    environment: demo
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify platform deployment gate
+        id: settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Assert-DeploymentGate
+          $dns = Get-Content '.\platform-alz\config\private-dns.json' -Raw | ConvertFrom-Json
+          "subscription-id=$($dns.subscriptionId)" >> $env:GITHUB_OUTPUT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.settings.outputs.subscription-id }}
+      - name: Provision platform-owned shared DNS and firewall rules
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Invoke-CheckedCommand az @('bicep', 'install', '--version', 'v0.48.1')
+          .\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:RUNNER_TEMP\platform-workload-dns"
+          $config = Get-Content '.\platform-alz\config\workload-egress.json' -Raw | ConvertFrom-Json
+          Invoke-CheckedCommand az @('deployment', 'group', 'create', '--subscription', $config.subscriptionId, '--resource-group', $config.resourceGroupName, '--name', 'ai-agent-and-private-runner-egress', '--template-file', '.\platform-alz\config\workload-egress.bicep', '--mode', 'Incremental', '--output', 'none')

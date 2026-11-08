@@ -124,3 +124,11 @@ jobs:
 
       - name: Provision shared platform DNS
         run: .\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:RUNNER_TEMP\platform-dns"
+
+      - name: Provision scoped agent and private runner firewall egress
+        run: |
+          $config = Get-Content '.\platform-alz\config\workload-egress.json' -Raw | ConvertFrom-Json
+          az deployment group create --subscription $config.subscriptionId `
+            --resource-group $config.resourceGroupName --name ai-agent-and-private-runner-egress `
+            --template-file '.\platform-alz\config\workload-egress.bicep' --mode Incremental --output none
+          if ($LASTEXITCODE -ne 0) { throw 'Workload firewall egress deployment failed.' }

@@ -1,0 +1,39 @@
+{
+  "upstreamRepository": "https://github.com/Azure-Samples/container-apps-ci-cd-runner-tutorial.git",
+  "upstreamRevision": "7924256b4523c8d09dfe4c0b0df95716391bf4e8",
+  "runnerBaseImage": "ghcr.io/actions/actions-runner:2.338.2",
+  "subscriptionId": "9fd780c4-e4ec-4204-83b9-cedca2c91b8e",
+  "location": "swedencentral",
+  "resourceGroupName": "rg-github-runner-swe",
+  "environmentName": "cae-github-runner-swe",
+  "jobName": "job-github-runner-swe",
+  "registryNamePrefix": "crghrunner",
+  "keyVaultNamePrefix": "kv-ghrunner",
+  "buildPoolName": "private-build",
+  "repositoryOwner": "azureholic",
+  "repositoryName": "ato-demo",
+  "runnerLabel": "private-azure",
+  "maxExecutions": 3,
+  "replicaTimeout": 14400,
+  "networking": {
+    "resourceGroupName": "rg-github-runner-swe",
+    "vnetName": "vnet-github-runner-swe",
+    "addressPrefix": "10.190.0.0/23",
+    "egressNextHopIp": "10.100.0.4",
+    "hub": {
+      "subscriptionId": "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
+      "resourceGroupName": "rg-hub-swe",
+      "vnetName": "vnet-hub-swe"
+    },
+    "subnets": [
+      { "name": "snet-containerapps", "addressPrefix": "10.190.0.0/24", "delegation": "Microsoft.App/environments", "serviceEndpoints": [] },
+      { "name": "snet-private-endpoints", "addressPrefix": "10.190.1.0/27", "delegation": "", "serviceEndpoints": [] },
+      { "name": "snet-acr-build", "addressPrefix": "10.190.1.32/27", "delegation": "", "serviceEndpoints": ["Microsoft.Storage", "Microsoft.KeyVault", "Microsoft.EventHub"] }
+    ]
+  },
+  "targetNetworks": [
+    { "subscriptionId": "9fd780c4-e4ec-4204-83b9-cedca2c91b8e", "resourceGroupName": "rg-ai-agent-spoke-ita", "vnetName": "vnet-ai-agent-spoke-ita" },
+    { "subscriptionId": "9fd780c4-e4ec-4204-83b9-cedca2c91b8e", "resourceGroupName": "rg-ai-governance-network-ita", "vnetName": "vnet-ai-governance-ita" }
+  ],
+  "tags": { "environment": "demo", "deployed_by": "bicep", "source": "Reusable private GitHub runner" }
+}

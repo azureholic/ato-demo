@@ -1,0 +1,88 @@
+name: Deploy reusable private GitHub runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: github-private-runner
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    environment: demo
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify deployment gate and GitHub App settings
+        id: settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          GITHUB_APP_ID: ${{ vars.GH_RUNNER_APP_ID }}
+          GITHUB_INSTALLATION_ID: ${{ vars.GH_RUNNER_INSTALLATION_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
+          GITHUB_APP_KEY_EXPIRES_ON: ${{ vars.GH_RUNNER_APP_KEY_EXPIRES_ON }}
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Assert-DeploymentGate
+          foreach ($name in 'GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID') {
+            if ([Environment]::GetEnvironmentVariable($name) -notmatch '^[1-9][0-9]*$') {
+              throw "Set $name with Initialize-GitHubApp.ps1."
+            }
+          }
+          if (-not $env:GITHUB_APP_PRIVATE_KEY) { throw 'Missing protected App private key.' }
+          $config = Read-ScenarioConfig '.\github-runner\config\deployment.json'
+          "subscription-id=$($config.subscriptionId)" >> $env:GITHUB_OUTPUT
+
+      - name: Test deployment adapters
+        run: .\shared-infrastructure\tests\Test-Deployment.ps1
+
+      - name: Install Bicep
+        run: |
+          az bicep install --version v0.48.1
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep installation failed.' }
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.settings.outputs.subscription-id }}
+
+      - name: Register runner resource providers
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          foreach ($provider in 'Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.KeyVault', 'Microsoft.Network', 'Microsoft.ManagedIdentity', 'Microsoft.OperationalInsights', 'Microsoft.Insights') {
+            Invoke-CheckedCommand az @('provider', 'register', '--namespace', $provider, '--wait', '--subscription', '${{ steps.settings.outputs.subscription-id }}', '--output', 'none')
+          }
+
+      - name: Prepare agent spoke before direct runner peering
+        run: |
+          .\ai-agent\Invoke-AiAgent.ps1 -Mode Network -OutputPath "$env:RUNNER_TEMP\agent-network"
+
+      - name: Provision private environment, build image on private ACR pool, deploy ephemeral job
+        env:
+          GITHUB_APP_ID: ${{ vars.GH_RUNNER_APP_ID }}
+          GITHUB_INSTALLATION_ID: ${{ vars.GH_RUNNER_INSTALLATION_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_RUNNER_APP_PRIVATE_KEY }}
+          GITHUB_APP_KEY_EXPIRES_ON: ${{ vars.GH_RUNNER_APP_KEY_EXPIRES_ON }}
+        run: |
+          .\github-runner\Invoke-GitHubRunner.ps1 -Mode Deploy -OutputPath "$env:RUNNER_TEMP\github-runner"
+
+      - name: Remove generated credentials and build context
+        if: always()
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'github-runner'
+          if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }

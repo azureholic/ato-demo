@@ -1,0 +1,45 @@
+name: Verify private GitHub runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  verify:
+    runs-on: [self-hosted, linux, x64, private-azure]
+    environment: demo
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify approval gate
+        id: settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Assert-DeploymentGate
+          $config = Read-ScenarioConfig '.\github-runner\config\deployment.json'
+          "subscription-id=$($config.subscriptionId)" >> $env:GITHUB_OUTPUT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.settings.outputs.subscription-id }}
+      - name: Verify tools and private endpoints
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          foreach ($tool in 'az', 'azd', 'pwsh', 'python3', 'git', 'gh', 'jq') { Get-Command $tool -ErrorAction Stop | Out-Null }
+          $config = Read-ScenarioConfig '.\github-runner\config\deployment.json'
+          $outputs = Invoke-CheckedCommand az @('deployment', 'group', 'show', '--subscription', $config.subscriptionId, '--resource-group', $config.resourceGroupName, '--name', 'github-runner', '--query', 'properties.outputs', '--output', 'json') | ConvertFrom-Json
+          .\shared-infrastructure\Test-PrivateConnectivity.ps1 -HostNames @($outputs.registryEndpoint.value, "$($outputs.keyVaultName.value).vault.azure.net")

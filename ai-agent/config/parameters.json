@@ -1,0 +1,27 @@
+{
+  "parameters": {
+    "deployContainerRegistry": { "value": false },
+    "deployLogAnalytics": { "value": false },
+    "deployAppInsights": { "value": false },
+    "enablePrivateLogAnalytics": { "value": false },
+    "hostedAgentContainerRegistryRoleAssignmentMode": { "value": "rbac" },
+    "storageAccountAllowSharedKeyAccess": { "value": false },
+    "storageAccountNetworkAclsBypass": { "value": "None" },
+    "allowedIpRanges": { "value": [] },
+    "vnetAddressPrefixes": { "value": ["10.180.0.0/21"] },
+    "agentSubnetPrefix": { "value": "10.180.0.0/24" },
+    "acaEnvironmentSubnetPrefix": { "value": "10.180.1.0/24" },
+    "peSubnetPrefix": { "value": "10.180.2.0/26" },
+    "applicationPeSubnetPrefix": { "value": "10.180.3.128/26" },
+    "deployAzureBastionSubnet": { "value": false },
+    "deployAzureFirewallSubnet": { "value": false },
+    "deployAzureFirewallManagementSubnet": { "value": false },
+    "deployGatewaySubnet": { "value": false },
+    "deployAppGatewaySubnet": { "value": false },
+    "deployJumpboxSubnet": { "value": false },
+    "deployDevopsBuildAgentsSubnet": { "value": false },
+    "deployPowerPlatformSubnet": { "value": false },
+    "deployAiGatewaySubnet": { "value": false },
+    "workloadProfiles": { "value": [{ "name": "Consumption", "workloadProfileType": "Consumption" }, { "name": "main", "workloadProfileType": "D4", "minimumCount": 0, "maximumCount": 1 }] }
+  }
+}

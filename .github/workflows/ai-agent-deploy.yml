@@ -1,0 +1,104 @@
+name: Deploy agent landing zone foundation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: ai-agent-foundation
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: windows-latest
+    environment: demo
+    timeout-minutes: 30
+    outputs:
+      subscription-id: ${{ steps.settings.outputs.subscription-id }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify approval, audience and configuration
+        id: settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          HOSTED_AGENT_RESOURCE_SCOPE: ${{ vars.HOSTED_AGENT_RESOURCE_SCOPE }}
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Assert-DeploymentGate
+          if ($env:HOSTED_AGENT_RESOURCE_SCOPE -notmatch '^[^\s]+/\.default$') {
+            throw 'Set the approved HOSTED_AGENT_RESOURCE_SCOPE before provisioning.'
+          }
+          $config = Read-ScenarioConfig '.\ai-agent\config\deployment.json'
+          "subscription-id=$($config.subscriptionId)" >> $env:GITHUB_OUTPUT
+          .\shared-infrastructure\tests\Test-Deployment.ps1
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.settings.outputs.subscription-id }}
+      - name: Prepare workload network and DNS links
+        run: |
+          az bicep install --version v0.48.1
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep installation failed.' }
+          .\ai-agent\Invoke-AiAgent.ps1 -Mode Network -OutputPath "$env:RUNNER_TEMP\agent-network"
+
+  provision:
+    needs: prepare
+    runs-on: [self-hosted, linux, x64, private-azure]
+    environment: demo
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recheck trusted deployment gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Assert-DeploymentGate
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ needs.prepare.outputs.subscription-id }}
+      - name: Authenticate azd through GitHub OIDC
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Invoke-CheckedCommand azd @('config', 'set', 'auth.useAzCliAuth', 'false')
+          Invoke-CheckedCommand azd @('auth', 'login', '--client-id', $env:AZURE_CLIENT_ID, '--tenant-id', $env:AZURE_TENANT_ID, '--federated-credential-provider', 'github', '--no-prompt')
+      - name: Verify private registry and Key Vault connectivity
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          $runner = Read-ScenarioConfig '.\github-runner\config\deployment.json'
+          $outputs = Invoke-CheckedCommand az @('deployment', 'group', 'show', '--subscription', $runner.subscriptionId, '--resource-group', $runner.resourceGroupName, '--name', 'github-runner', '--query', 'properties.outputs', '--output', 'json') | ConvertFrom-Json
+          .\shared-infrastructure\Test-PrivateConnectivity.ps1 -HostNames @($outputs.registryEndpoint.value, "$($outputs.keyVaultName.value).vault.azure.net")
+      - name: Provision Bicep foundation through pinned upstream lifecycle
+        env:
+          HOSTED_AGENT_RESOURCE_SCOPE: ${{ vars.HOSTED_AGENT_RESOURCE_SCOPE }}
+        run: |
+          .\ai-agent\Invoke-AiAgent.ps1 -Mode Deploy -OutputPath (Join-Path $env:RUNNER_TEMP 'agent-landing-zone')
+      - name: Remove generated environment and credentials
+        if: always()
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'agent-landing-zone'
+          if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }

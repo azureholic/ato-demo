@@ -1,6 +1,6 @@
 # SMB platform landing zone - Bicep Accelerator
 
-The [single workflow](../.github/workflows/alz-deploy.yml) runs on a public
+The [platform workflow](../.github/workflows/alz-deploy.yml) runs on a public
 GitHub-hosted Windows runner. **No state storage account, public state-storage
 endpoint, Blob state access or remote Terraform state is required.**
 
@@ -25,6 +25,10 @@ endpoint, Blob state access or remote Terraform state is required.**
 7. After the official ALZ deployment succeeds, sign in to Azure CLI again with
    a fresh OIDC assertion and provision shared platform DNS. This avoids relying
    on the CLI login from before a potentially long stack deployment.
+8. Add the dedicated agent/private-runner firewall rule collection from
+   [workload-egress.json](config/workload-egress.json) using
+   [workload-egress.bicep](config/workload-egress.bicep). Existing policy collections
+   are not replaced.
 
 The official script deploys **Azure deployment stacks**. Azure stores their
 management metadata; no external state backend is involved. With
@@ -59,6 +63,21 @@ also adds cross-subscription peerings to the existing hub; it does not modify
 its subnets or firewall routing. See the
 [GovHub networking guidance](../ai-governance-hub/README.md#provider-readiness-and-network-preparation)
 for permissions, execution order and migration cautions.
+
+The [agent scenario](../ai-agent/README.md) and
+[reusable private runner](../github-runner/README.md) also consume this inventory.
+Additional Search, App Configuration, ACR, region-specific Container Apps and
+private-monitoring zones remain centrally owned. Their spoke preparation only
+links existing zones. All workloads sharing the private-monitoring DNS network
+reuse one AMPLS rather than creating competing scopes.
+
+For an existing platform, run the separately approved
+[workload connectivity workflow](../.github/workflows/platform-workload-connectivity.yml)
+to add these zones and scoped egress rules without rerunning the full Accelerator.
+The firewall source CIDRs and package/control-plane allow-list are version-controlled
+in [workload-egress.json](config/workload-egress.json). New spokes use Azure-provided
+DNS and a default route to the hub firewall; peering does not make spoke connectivity
+transitive, so the private runner has explicit direct workload peerings.
 
 - [inputs.yaml](config/inputs.yaml): based on the official Bicep local bootstrap
   example; Azure bootstrap resource creation is disabled.
