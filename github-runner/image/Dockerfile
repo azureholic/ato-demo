@@ -17,12 +17,14 @@ RUN curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/
     && tar -xzf /tmp/azd.tar.gz -C /tmp \
     && install /tmp/azd-linux-amd64 /usr/local/bin/azd \
     && rm /tmp/azd.tar.gz /tmp/azd-linux-amd64 \
-    && az bicep install --version v0.48.1
+    && curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/Azure/bicep/releases/download/v0.48.1/bicep-linux-x64" -o /usr/local/bin/bicep \
+    && chmod 755 /usr/local/bin/bicep \
+    && bicep --version
 COPY github-actions-runner/entrypoint.sh /home/runner/entrypoint.sh
 COPY github-actions-runner/register.py /home/runner/register.py
 RUN chmod 755 /home/runner/entrypoint.sh && chown runner:runner /home/runner/entrypoint.sh /home/runner/register.py
 USER runner
 WORKDIR /home/runner
-ENV PATH="/home/runner/.local/bin:${PATH}"
-RUN az bicep install --version v0.48.1
+ENV PATH="/home/runner/.local/bin:${PATH}" \
+    AZURE_BICEP_USE_BINARY_FROM_PATH=true
 ENTRYPOINT ["/home/runner/entrypoint.sh"]
