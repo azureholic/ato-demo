@@ -71,7 +71,7 @@ jobs:
 
       - name: Install Bicep CLI
         run: |
-          az bicep install --version v0.48.1
+          az bicep install
           if ($LASTEXITCODE -ne 0) { throw 'Bicep CLI installation failed.' }
 
       - name: Authenticate Azure CLI for provider registration and networking

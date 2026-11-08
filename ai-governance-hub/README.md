@@ -226,7 +226,7 @@ permissions outside this workflow. The existing `demo` approval gate remains.
 Deployment uses native `azd` GitHub federated authentication rather than a
 client secret or delegation to an old Azure CLI login. Azure CLI also signs in
 with OIDC for provider registration and cross-subscription networking. Versions are pinned:
-upstream commit in configuration, azd 1.37.3 and Bicep CLI 0.48.1 in the workflow.
+upstream commit in configuration, azd 1.37.3 in the workflow. Bicep CLI is not pinned; the workflow installs the latest.
 azd manages its own Bicep tool for provisioning. Review upstream release changes
 and run validation before updating the commit; do not replace it with `main`.
 

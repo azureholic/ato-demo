@@ -43,7 +43,7 @@ jobs:
       - name: Provision platform-owned shared DNS and firewall rules
         run: |
           . .\shared-infrastructure\Deployment.ps1
-          Invoke-CheckedCommand az @('bicep', 'install', '--version', 'v0.48.1')
+          Invoke-CheckedCommand az @('bicep', 'install')
           .\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:RUNNER_TEMP\platform-workload-dns"
           $config = Get-Content '.\platform-alz\config\workload-egress.json' -Raw | ConvertFrom-Json
           Invoke-CheckedCommand az @('deployment', 'group', 'create', '--subscription', $config.subscriptionId, '--resource-group', $config.resourceGroupName, '--name', 'ai-agent-and-private-runner-egress', '--template-file', '.\platform-alz\config\workload-egress.bicep', '--mode', 'Incremental', '--output', 'none')

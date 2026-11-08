@@ -146,8 +146,8 @@ can create replacement resources; review stack ownership and `DeleteAll`
 behavior before deploying this naming change.
 
 Pinned versions: ALZ PowerShell 7.1.5, bootstrap modules v7.3.2, Bicep starter
-v2.4.0, Bicep CLI v0.44.1, powershell-yaml 0.4.12, Az.Accounts 5.5.4,
-Az.Resources 10.2.2, and generation-only Terraform 1.14.9. Change the Terraform
+v2.4.0, powershell-yaml 0.4.12, Az.Accounts 5.5.4,
+Az.Resources 10.2.2, and generation-only Terraform 1.14.9. Bicep CLI is not pinned; the workflow installs the latest. Change the Terraform
 version in both workflow and bootstrap inputs together.
 
 ## GitHub setup and deployment cautions

@@ -17,7 +17,7 @@ RUN curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/
     && tar -xzf /tmp/azd.tar.gz -C /tmp \
     && install /tmp/azd-linux-amd64 /usr/local/bin/azd \
     && rm /tmp/azd.tar.gz /tmp/azd-linux-amd64 \
-    && curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/Azure/bicep/releases/download/v0.48.1/bicep-linux-x64" -o /usr/local/bin/bicep \
+    && curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL "https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64" -o /usr/local/bin/bicep \
     && chmod 755 /usr/local/bin/bicep \
     && bicep --version
 COPY github-actions-runner/entrypoint.sh /home/runner/entrypoint.sh

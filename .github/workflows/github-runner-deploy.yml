@@ -52,7 +52,7 @@ jobs:
 
       - name: Install Bicep
         run: |
-          az bicep install --version v0.48.1
+          az bicep install
           if ($LASTEXITCODE -ne 0) { throw 'Bicep installation failed.' }
 
       - uses: azure/login@v2
