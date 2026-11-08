@@ -6,6 +6,9 @@
     "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
     "9fd780c4-e4ec-4204-83b9-cedca2c91b8e"
   ],
+  "excludedVirtualNetworkIds": [
+    "/subscriptions/9fd780c4-e4ec-4204-83b9-cedca2c91b8e/resourceGroups/rg-ai-agent-network-ita/providers/Microsoft.Network/virtualNetworks/vnet-ai-agent-ita"
+  ],
   "zones": {
     "openai": "privatelink.openai.azure.com",
     "cognitiveServices": "privatelink.cognitiveservices.azure.com",

@@ -22,7 +22,8 @@ composition, validation and private post-provision hooks. It does not deploy age
 
 The new spoke reuses the address range of the previous, unpeered
 `vnet-ai-agent-ita` but has a different name and resource group; the old VNet is
-not managed by this deployment. Do not reconnect the old VNet to the hub or the
+excluded from new platform DNS links and is not managed by this deployment.
+Existing DNS links are not removed. Do not reconnect the old VNet to the hub or the
 runner spoke while it overlaps the new spoke. This adapter is not an import or
 migration tool: it manages the complete new spoke subnet collection.
 It never deletes the shared hub, platform DNS or Governance Hub.

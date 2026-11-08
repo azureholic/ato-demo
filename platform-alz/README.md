@@ -43,9 +43,10 @@ bootstrap. Existing private bootstrap storage and its state are left untouched.
 `rg-dns` resource-group name, location, zone inventory and VNet discovery
 subscriptions. The platform workflow runs
 [Invoke-PlatformDns.ps1](Invoke-PlatformDns.ps1) after successful ALZ deployment
-to create the group, shared zones and links to all discovered VNets, without a
-Private Resolver or autoregistration. Discovered VNets must use Azure-provided
-DNS; custom DNS stops the stage before changes.
+to create the group, shared zones and links to discovered VNets except those in
+`excludedVirtualNetworkIds`, without a Private Resolver or autoregistration.
+Included VNets must use Azure-provided DNS; custom DNS stops the stage before
+changes. Exclusion prevents new links but does not remove existing ones.
 
 [private-dns.bicep](config/private-dns.bicep) provisions zones and invokes the
 reusable [link-only module](config/private-dns-links.bicep). This incremental DNS

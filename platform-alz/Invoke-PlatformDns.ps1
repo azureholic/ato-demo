@@ -34,6 +34,7 @@ $virtualNetworkIds = [Collections.Generic.List[string]]::new()
 foreach ($subscriptionId in ($dns.virtualNetworkSubscriptionIds | Select-Object -Unique)) {
     $vnets = Invoke-CheckedCommand az @('network', 'vnet', 'list', '--subscription', $subscriptionId, '--output', 'json')
     foreach ($vnet in ($vnets | ConvertFrom-Json)) {
+        if ($vnet.id -in $dns.excludedVirtualNetworkIds) { continue }
         $dhcpOptions = $vnet.PSObject.Properties['dhcpOptions']
         if ($null -ne $dhcpOptions -and $null -ne $dhcpOptions.Value) {
             $dnsServers = $dhcpOptions.Value.PSObject.Properties['dnsServers']

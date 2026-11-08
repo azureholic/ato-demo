@@ -251,6 +251,8 @@ function Test-PlatformDns {
             )
             if ($args[4] -eq $platformDns.subscriptionId) {
                 $vnets += @{ id = "/subscriptions/$($args[4])/resourceGroups/rg-other/providers/Microsoft.Network/virtualNetworks/vnet-other"; dhcpOptions = @{ dnsServers = @() } }
+            } else {
+                $vnets += @{ id = $platformDns.excludedVirtualNetworkIds[0]; dhcpOptions = @{ dnsServers = @('10.0.0.4') } }
             }
             if ($dnsTestState.Failure -eq 'custom-dns') { $vnets[0].dhcpOptions.dnsServers = @('10.100.0.4') }
             if ($dnsTestState.Failure -eq 'implicit-dns') {
@@ -277,7 +279,10 @@ function Test-PlatformDns {
         $parameters.parameters.zoneNames.value.Count -ne @($platformDns.zones.PSObject.Properties).Count -or
         @($dnsTestState.Calls | Where-Object { $_ -like "az group create --subscription $($platformDns.subscriptionId) --name $($platformDns.resourceGroupName)*" }).Count -ne 1 -or
         @($dnsTestState.Calls | Where-Object { $_ -like "az deployment group create --subscription $($platformDns.subscriptionId)*--mode Incremental*" }).Count -ne 1) {
-        throw 'Platform DNS must own group/zone provisioning and link every discovered VNet in its configured subscriptions.'
+        throw 'Platform DNS must link discovered VNets except explicitly excluded networks.'
+    }
+    if ($platformDns.excludedVirtualNetworkIds[0] -in $parameters.parameters.virtualNetworkIds.value) {
+        throw 'Excluded VNets must not receive new platform DNS links.'
     }
     foreach ($case in @(
         @{ Failure = 'compile'; Error = 'exit code 17' },
