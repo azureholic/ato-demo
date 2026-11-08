@@ -23,7 +23,7 @@ function git {
         $files = @{
             'Dockerfile.github' = ''
             'github-actions-runner\entrypoint.sh' = ''
-            'azure.yaml' = ''
+            'azure.yaml' = "run: scripts/preProvision.sh`nrun: scripts/preProvision.ps1"
             'manifest.json' = '{}'
             'main.parameters.json' = '{"parameters":{"aiFoundryLocation":{"value":"${AZURE_AI_FOUNDRY_LOCATION}"}}}'
             'infra\bicep\main.bicep' = ''
@@ -93,6 +93,15 @@ function Assert-Failure {
 }
 
 try {
+    $armParametersPath = Join-Path $testRoot 'arm-parameters.json'
+    @{ parameters = @{ additionalAppConfigurationSettings = @{ value = @(
+        @{ name = 'json'; value = '[]' },
+        @{ name = 'brackets'; value = '[[]' },
+        @{ name = 'plain'; value = 'hello' }
+    ) } } } | ConvertTo-Json -Depth 10 | Set-Content $armParametersPath
+    & (Join-Path $repo 'ai-agent\Protect-ArmParameters.ps1') $armParametersPath
+    $values = @((Get-Content $armParametersPath -Raw | ConvertFrom-Json).parameters.additionalAppConfigurationSettings.value | ForEach-Object value)
+    if ($values[0] -ne '[[]' -or $values[1] -ne '[[[]' -or $values[2] -ne 'hello') { throw 'ARM setting escaping failed.' }
     $agentConfig = Get-Content (Join-Path $repo 'ai-agent\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
     $runnerConfig = Get-Content (Join-Path $repo 'github-runner\config\deployment.json') -Raw | ConvertFrom-Json -AsHashtable
     $agentTargets = @($runnerConfig.targetNetworks | Where-Object {

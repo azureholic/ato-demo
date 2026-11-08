@@ -19,6 +19,10 @@ composition, validation and private post-provision hooks. It does not deploy age
   `HOSTED_AGENT_RESOURCE_SCOPE` is required; no audience is guessed.
 - Private ACR, workspace, Application Insights and AMPLS are reused from the Sweden
   runner scenario, avoiding unsupported Italy ACR pools and conflicting shared AMPLS DNS.
+- Foundry IQ uses minimal extraction because standard extraction requires Content
+  Understanding, which the upstream preflight does not support in Italy North.
+  Scanned and image-only PDFs will not be searchable without OCR. Changing extraction
+  mode after creating a knowledge source requires recreating it and its knowledge base.
 
 The new spoke reuses the address range of the previous, unpeered
 `vnet-ai-agent-ita` but has a different name and resource group; the old VNet is
@@ -64,6 +68,8 @@ The generated checkout hardens three pinned upstream gaps with exact-match guard
 Foundry Key Vault purge protection, Foundry Storage shared-key disablement, and
 App Configuration local-auth disablement. Solution Storage uses its native parameter.
 Revision changes require reviewing these guards and upstream parameters.
+The preprovision hook also escapes bracket-prefixed App Configuration values in the
+generated ARM parameters; ARM resolves them back to their original values.
 
 Generated azd state is transient and removed by workflow cleanup. Reuse the same
 environment, resource names, application binding and pins on reruns; never run

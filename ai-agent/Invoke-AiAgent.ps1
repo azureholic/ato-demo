@@ -16,6 +16,17 @@ foreach ($file in 'azure.yaml', 'manifest.json', 'main.parameters.json', 'infra\
     if (-not (Test-Path (Join-Path $OutputPath $file))) { throw "Pinned foundation is missing $file; review the upstream contract." }
 }
 
+$azureYamlPath = Join-Path $OutputPath 'azure.yaml'
+$azureYaml = Get-Content $azureYamlPath -Raw
+foreach ($shell in 'sh', 'ps1') {
+    $hook = "run: scripts/preProvision.$shell"
+    if ([regex]::Matches($azureYaml, [regex]::Escape($hook)).Count -ne 1) { throw "Review changed upstream $shell preprovision hook." }
+    $command = if ($shell -eq 'sh') { 'scripts/preProvision.sh' } else { 'pwsh -NoProfile -File scripts/preProvision.ps1' }
+    $azureYaml = $azureYaml.Replace($hook, "run: $command && pwsh -NoProfile -File scripts/Protect-ArmParameters.ps1 infra/bicep/main.parameters.json")
+}
+Set-Content $azureYamlPath $azureYaml -NoNewline
+Copy-Item (Join-Path $PSScriptRoot 'Protect-ArmParameters.ps1') (Join-Path $OutputPath 'scripts\Protect-ArmParameters.ps1')
+
 # Harden gaps in the pinned foundation only in the generated runner checkout.
 $vaultPath = Join-Path $OutputPath 'infra\bicep\modules\ai-foundry\foundry\modules\keyVault.bicep'
 $vaultSource = Get-Content $vaultPath -Raw

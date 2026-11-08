@@ -42,6 +42,7 @@
     "existingPrivateDnsZoneAppInsightsResourceId": "appInsights"
   },
   "environment": {
+    "AZURE_PRINCIPAL_TYPE": "ServicePrincipal",
     "ORCHESTRATION_HOST": "hosted",
     "APPLICATION_MODE": "conversational",
     "NETWORK_ISOLATION": "true",
@@ -61,8 +62,10 @@
     "DEPLOY_ACR_TASK_AGENT_POOL": "false",
     "HUB_INTEGRATION_CREATE_HUB_PEERING": "false",
     "DEPLOY_INGESTION_CONTAINER_APP": "false",
+    "ENABLE_AGENTIC_RETRIEVAL": "false",
+    "FOUNDRY_IQ_CONTENT_EXTRACTION_MODE": "minimal",
     "RUN_FROM_JUMPBOX": "true",
-    "AZURE_SKIP_NETWORK_ISOLATION_WARNING": "false",
+    "AZURE_SKIP_NETWORK_ISOLATION_WARNING": "true",
     "RESOURCE_NAMING_MODE": "caf",
     "CAF_WORKLOAD_NAME": "ai-agent",
     "CAF_ENVIRONMENT_NAME": "demo",
