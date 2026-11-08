@@ -40,6 +40,8 @@ jobs:
         run: |
           . .\shared-infrastructure\Deployment.ps1
           foreach ($tool in 'az', 'azd', 'pwsh', 'python3', 'git', 'gh', 'jq') { Get-Command $tool -ErrorAction Stop | Out-Null }
+          $bicepVersion = Invoke-CheckedCommand az @('bicep', 'version')
+          if ($bicepVersion -notmatch '\b0\.48\.1\b') { throw "Unexpected Bicep version: $bicepVersion" }
           $config = Read-ScenarioConfig '.\github-runner\config\deployment.json'
           $outputs = Invoke-CheckedCommand az @('deployment', 'group', 'show', '--subscription', $config.subscriptionId, '--resource-group', $config.resourceGroupName, '--name', 'github-runner', '--query', 'properties.outputs', '--output', 'json') | ConvertFrom-Json
           .\shared-infrastructure\Test-PrivateConnectivity.ps1 -HostNames @($outputs.registryEndpoint.value, "$($outputs.keyVaultName.value).vault.azure.net")
