@@ -16,13 +16,12 @@
     "businessUnit": "Platform",
     "useCaseName": "WebResearch",
     "environment": "DEMO",
-    "apiName": "azure-openai-api",
+    "apiName": "universal-llm-api",
     "connectionNamePrefix": "govhub-web-research"
   },
   "model": {
     "name": "gpt-6-astra",
     "version": "2026-09-03",
-    "apiVersion": "2025-04-01-preview",
     "tokensPerMinute": 10000,
     "monthlyTokenQuota": 1000000
   },

@@ -98,11 +98,12 @@ server and allowed tools and denies everything else; the workflow smoke test use
 Not tested against live Azure. Before first use, confirm in order:
 
 1. **Gateway reachability.** Connected-model inference originates from Foundry's managed inference
-   plane, not the delegated agent subnet, so private-only APIM ingress may not be reachable
-   ([Microsoft guidance](https://learn.microsoft.com/azure/foundry/agents/how-to/ai-gateway)).
-   A successful call from the private runner does not prove this.
-2. **Tool calling.** The Hub model must support function/tool calling through the legacy
-   `azure-openai-api` route, and `allowSubscriptionKey` must be true on it.
+   plane, not the delegated agent subnet ([Microsoft guidance](https://learn.microsoft.com/azure/foundry/agents/how-to/ai-gateway)).
+   The Hub's APIM gateway endpoint is public, and a Foundry-originated request was observed in the
+   APIM gateway logs, so reachability works for this topology. Re-check if APIM ingress is ever made private.
+2. **Tool calling.** The Hub model must support function/tool calling through the OpenAI-v1
+   `universal-llm-api` route (`/models/chat/completions`). The legacy `azure-openai-api` route returned 404
+   from the Hub's backends, so the contract uses `universal-llm-api`. Run `ModelCheck` to verify.
 3. **Web IQ.** The account is entitled to `web`/`browse`, the key works from Foundry's MCP execution
    path, and any firewall egress to `api.microsoft.ai` is approved (it is not in the current
    [workload egress list](../../infrastructure/platform-alz/config/workload-egress.json)).

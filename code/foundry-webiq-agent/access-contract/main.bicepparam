@@ -53,12 +53,13 @@ param foundry = {
 
 // ApiKey keeps the contract independent of the Hub's JWT named values. ProjectManagedIdentity
 // additionally requires jwtRequired/jwtAudience in the product policy and the project MI client ID.
+// universal-llm-api is the OpenAI v1 style API at <gateway>/models: the model travels in the request
+// body and no api-version is sent. The legacy azure-openai-api route 404s for the Hub's Foundry pools.
 param foundryConfig = {
   connectionNamePrefix: config.accessContract.connectionNamePrefix
   authType: 'ApiKey'
-  deploymentInPath: 'true'
+  deploymentInPath: 'false'
   isSharedToAll: true
-  inferenceAPIVersion: config.model.apiVersion
   staticModels: [
     {
       name: config.model.name
