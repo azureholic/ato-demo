@@ -1,13 +1,12 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-  Deploys the platform jumpbox: a hub subnet, Bastion Developer and a Windows Server desktop VM that can reach private APIM and Foundry.
+  Deploys the platform jumpbox: a hub subnet, Bastion Developer and a Windows Server VM with a full desktop.
 .DESCRIPTION
   Validate  Compile the templates. No Azure calls.
-  Deploy    Firewall egress rules for the jumpbox subnet, then the subnet/NSG/VM/Bastion Developer, then the tools install
-            (Azure CLI and the hub-check helper, idempotent), then Check.
-  Check     From inside the VM (Azure run command, no Bastion needed) verify the configured endpoints resolve to
-            private addresses and answer over HTTPS.
+  Deploy    Firewall egress rules for the jumpbox subnet, then the subnet/NSG/VM/Bastion Developer, then wait until the
+            VM is running. Nothing is installed or run inside the VM; install what you need yourself.
+  Check     Report whether the VM exists and is running (Azure control plane only).
   The local administrator password comes from JUMPBOX_ADMIN_PASSWORD and is read by the bicepparam file, so it is never
   written to a parameter file or passed on a command line. Connect with Bastion Developer (RDP) from the Azure portal.
 #>
@@ -41,8 +40,8 @@ if ($config.subscriptionId -ne $settings.subscriptionId -or $config.location -ne
 if ($config.subnet.addressPrefix -notmatch '^10\.100\.\d{1,3}\.\d{1,3}/(2[4-9])$') {
     throw 'The jumpbox subnet must be a /24-/29 inside the hub address space.'
 }
-if (@($config.connectivityTargets).Count -eq 0 -or @($config.egressFqdns).Count -eq 0) {
-    throw 'Configure the endpoints to verify and the allowed egress FQDNs.'
+if (@($config.egressFqdns).Count -eq 0) {
+    throw 'Configure the allowed egress FQDNs.'
 }
 
 New-Item $OutputPath -ItemType Directory -Force | Out-Null
@@ -56,47 +55,26 @@ function Build-Templates {
     return $built
 }
 
-function Invoke-VmScript {
-    param([string]$ScriptPath)
-    $global:LASTEXITCODE = 0
-    $raw = & az vm run-command invoke --subscription $config.subscriptionId --resource-group $config.resourceGroupName `
-        --name $config.vm.name --command-id RunPowerShellScript --scripts "@$ScriptPath" --query 'value[0].message' --output tsv
-    if ($LASTEXITCODE -ne 0) { throw "Run command on $($config.vm.name) failed with exit code $LASTEXITCODE." }
-    return ($raw -join "`n")
-}
-
-function Install-JumpboxTools {
-    $targets = (@($config.connectivityTargets) | ForEach-Object { "'$_'" }) -join ','
-    $script = (Get-Content (Join-Path $configRoot 'jumpbox-tools.ps1') -Raw).Replace('__TARGETS__', $targets)
-    $path = Join-Path $OutputPath 'jumpbox-tools.rendered.ps1'
-    Set-Content $path $script
-    $text = Invoke-VmScript $path
-    if ($text -notmatch 'azure-cli installed') { throw "The jumpbox tools were not installed:`n$text" }
-    Write-Host ($text -split "`n" | Where-Object { $_ -match 'azure-cli installed' } | Select-Object -Last 1).Trim()
-}
-
-function Test-JumpboxConnectivity {
-    $path = Join-Path $OutputPath 'jumpbox-check.ps1'
-    Set-Content $path "& 'C:\ProgramData\jumpbox\hub-check.ps1'; & 'C:\ProgramData\jumpbox\activation-check.ps1'"
-    $text = Invoke-VmScript $path
-    $lines = @($text -split "`n" | Where-Object { $_ -match '\[(private|PUBLIC|unresolved)\]' })
-    $lines | ForEach-Object { Write-Host $_.Trim() }
-    if ($lines.Count -ne @($config.connectivityTargets).Count) {
-        throw "Expected a result for each of $(@($config.connectivityTargets).Count) endpoints but got $($lines.Count). The tools install may not have run.`n$text"
+function Wait-JumpboxRunning {
+    $deadline = (Get-Date).AddMinutes(20)
+    do {
+        $view = (Invoke-CheckedCommand az @(
+            'vm', 'get-instance-view', '--subscription', $config.subscriptionId,
+            '--resource-group', $config.resourceGroupName, '--name', $config.vm.name, '--output', 'json'
+        ) | Out-String) | ConvertFrom-Json
+        $running = @($view.instanceView.statuses | Where-Object { $_.code -eq 'PowerState/running' }).Count -gt 0
+        if ($running -and $view.provisioningState -eq 'Succeeded') { break }
+        Start-Sleep -Seconds 20
+    } while ((Get-Date) -lt $deadline)
+    if (-not $running) { throw "VM $($config.vm.name) is not running (provisioning state $($view.provisioningState))." }
+    if ($view.provisioningState -ne 'Succeeded') {
+        Write-Warning "VM $($config.vm.name) is running but still reports provisioning state $($view.provisioningState); platform policy extensions may still be installing."
     }
-    $bad = @($lines | Where-Object { $_ -notmatch '\[private\]' -or $_ -match '=> 000' })
-    if ($bad.Count -gt 0) {
-        throw "Not every endpoint is privately reachable from the jumpbox:`n$($bad -join "`n")"
-    }
-    Write-Host 'Verified from the jumpbox: every endpoint resolves privately and answers over HTTPS.'
-
-    $activation = @($text -split "`n" | Where-Object { $_ -match '^(activation|imds-chain|kms )' } | ForEach-Object { $_.Trim() })
-    $activation | ForEach-Object { Write-Host $_ }
-    $failed = @($activation | Where-Object { $_ -match 'NotLicensed|FAIL|BLOCKED' })
-    if ($activation.Count -lt 4 -or $failed.Count -gt 0) {
-        throw "Windows activation checks failed; the VM would show the 'deactivated' pop-up. Allow Azure KMS (TCP 1688) and the certificate/OCSP endpoints (HTTP 80) in jumpbox-egress.bicep.`n$($activation -join "`n")"
-    }
-    Write-Host 'Verified from the jumpbox: Windows is licensed and its IMDS attestation chain validates.'
+    $ip = (Invoke-CheckedCommand az @(
+        'network', 'nic', 'show', '--subscription', $config.subscriptionId, '--resource-group', $config.resourceGroupName,
+        '--name', "nic-$($config.vm.name)", '--query', 'ipConfigurations[0].privateIPAddress', '--output', 'tsv'
+    ) | Out-String).Trim()
+    Write-Host "VM $($config.vm.name) is running ($($config.vm.image.sku), $($config.vm.size)) at $ip."
 }
 
 $templates = Build-Templates
@@ -115,7 +93,7 @@ if ($Mode -eq 'Validate') {
 }
 
 if ($Mode -eq 'Check') {
-    Test-JumpboxConnectivity
+    Wait-JumpboxRunning
     return
 }
 
@@ -136,5 +114,4 @@ Invoke-CheckedCommand az @(
     '--name', 'platform-jumpbox', '--parameters', (Join-Path $configRoot 'jumpbox.bicepparam'), '--output', 'none'
 )
 Write-Host "Deployed jumpbox $($config.vm.name) in $($config.hub.vnetName)/$($config.subnet.name); connect with Bastion Developer (RDP) from the Azure portal."
-Install-JumpboxTools
-Test-JumpboxConnectivity
+Wait-JumpboxRunning
