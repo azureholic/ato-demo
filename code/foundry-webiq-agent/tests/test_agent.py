@@ -34,7 +34,7 @@ def test_model_uses_governance_hub_connection(config):
 def test_definition_attaches_only_allowed_web_iq_tools_with_approval(config):
     definition = build_definition(config)
     tool = definition.tools[0]
-    assert definition.reasoning.effort == "none"
+    assert definition.reasoning.effort == "low"
     assert tool.server_url == "https://api.microsoft.ai/v3/mcp"
     assert tool.project_connection_id == "web-iq-mcp"
     assert tool.allowed_tools == ["web", "browse"]

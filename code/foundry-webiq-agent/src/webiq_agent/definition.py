@@ -18,8 +18,8 @@ def build_tool(config: AgentConfig) -> MCPTool:
 
 
 def build_definition(config: AgentConfig) -> PromptAgentDefinition:
-    # gpt-6 models reject function tools on Chat Completions while reasoning is enabled; the Hub
-    # connection uses Chat Completions, so reasoning effort is configurable (default 'none').
+    # gpt-6-astra accepts only low/medium/high reasoning effort and rejects function tools on Chat
+    # Completions while reasoning is on, so tool calling needs Responses routing (see README).
     return PromptAgentDefinition(
         model=config.model_deployment,
         instructions=config.instructions_path.read_text(encoding="utf-8"),
