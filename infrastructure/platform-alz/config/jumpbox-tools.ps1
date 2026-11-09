@@ -18,6 +18,25 @@ foreach ($h in $Hosts) {
 }
 '@ | Set-Content -Path (Join-Path $dir 'hub-check.ps1') -Encoding UTF8
 
+@'
+# Windows Server Azure Edition deactivates itself when its IMDS attestation certificate chain cannot be validated.
+$ProgressPreference = 'SilentlyContinue'
+$license = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationId='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1
+'activation: {0}' -f $(if ($license -and $license.LicenseStatus -eq 1) { 'Licensed' } else { "NotLicensed ($($license.LicenseStatus))" })
+try {
+    $doc = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Uri 'http://169.254.169.254/metadata/attested/document?api-version=2018-10-01' -TimeoutSec 20
+    $cert = [Security.Cryptography.X509Certificates.X509Certificate2]([Convert]::FromBase64String($doc.signature))
+    $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+    'imds-chain: {0}' -f $(if ($chain.Build($cert)) { 'PASS' } else { 'FAIL ' + (($chain.ChainStatus | ForEach-Object Status) -join ',') })
+} catch { 'imds-chain: FAIL {0}' -f $_.Exception.Message }
+foreach ($ip in '20.118.99.224', '40.83.235.53') {
+    $tcp = New-Object Net.Sockets.TcpClient
+    $ok = $tcp.ConnectAsync($ip, 1688).Wait(8000) -and $tcp.Connected
+    $tcp.Dispose()
+    'kms {0}:1688: {1}' -f $ip, $(if ($ok) { 'reachable' } else { 'BLOCKED' })
+}
+'@ | Set-Content -Path (Join-Path $dir 'activation-check.ps1') -Encoding UTF8
+
 # Desktop shortcut so the check is one double-click away.
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut('C:\Users\Public\Desktop\Hub connectivity check.lnk')

@@ -271,9 +271,9 @@ subnets as child resources.
 | Piece | Details (config in [jumpbox.json](config/jumpbox.json)) |
 | --- | --- |
 | Subnet | `snet-jumpbox` `10.100.1.0/27` in the hub VNet `vnet-hub-swe`, with an NSG (RDP only from the VNet) and the Accelerator's `rt-hub-std-swe` route table (default route via the hub firewall). No default outbound access. |
-| VM | `vm-jumpbox-swe`, **Windows Server 2022 Datacenter Azure Edition with Desktop Experience** (full desktop, not Server Core), `Standard_B4s_v2` (4 vCPU, 16 GB), Trusted Launch, no public IP, local administrator `azureuser` with a password. The deploy script installs the Azure CLI and a `hub-check` helper (desktop shortcut **Hub connectivity check**) through a run command ([jumpbox-tools.ps1](config/jumpbox-tools.ps1), idempotent). |
+| VM | `vm-jumpbox-swe`, **Windows Server 2025 Datacenter Azure Edition with Desktop Experience** (full desktop, not Server Core), `Standard_B4s_v2` (4 vCPU, 16 GB), Trusted Launch, no public IP, local administrator `azureuser` with a password. The deploy script installs the Azure CLI and the `hub-check` / `activation-check` helpers (desktop shortcut **Hub connectivity check**) through a run command ([jumpbox-tools.ps1](config/jumpbox-tools.ps1), idempotent). |
 | Bastion | **Developer SKU**: free, no `AzureBastionSubnet` or public IP, one connection at a time, portal only, and **only VMs in its own VNet**, so the VM is in the hub VNet, not a spoke. Available in Sweden Central. |
-| Egress | Dedicated firewall rule group `platform-jumpbox` (priority 320): Entra sign-in, Azure and Foundry portals, Windows Update (FQDN tag), Azure CLI download and PyPI. Add domains to `egressFqdns` as the desktop needs them. |
+| Egress | Dedicated firewall rule group `platform-jumpbox` (priority 320): Entra sign-in, Azure and Foundry portals, Windows Update (FQDN tag), Azure CLI download and PyPI, plus what **Azure Edition needs to stay activated**: Azure KMS (`20.118.99.224`, `40.83.235.53`, TCP 1688) and the certificate download/OCSP endpoints (HTTP 80) for its IMDS attestation chain. Blocking those makes the VM show "has been deactivated". Add domains to `egressFqdns` as the desktop needs them. |
 | Private access | The hub VNet is peered directly with the GovHub, agent and runner spokes and linked to the shared private DNS zones, so `*.azure-api.net` and `*.services.ai.azure.com` resolve to private endpoints. |
 
 Create a strong password and store it as the GitHub `demo` environment **secret** `JUMPBOX_ADMIN_PASSWORD`
@@ -281,7 +281,8 @@ Create a strong password and store it as the GitHub `demo` environment **secret*
 password from the environment (never a parameter file or command line), deploys the firewall rules,
 the subnet, NSG, VM and Bastion, installs the tools, then runs `hub-check` inside the VM through an
 Azure run command and fails unless every endpoint in `connectivityTargets` resolves to a private
-address and answers over HTTPS. Rotate the password by changing the secret and resetting it on the VM
+address and answers over HTTPS, and unless Windows is licensed, its IMDS attestation chain validates
+and Azure KMS is reachable. Rotate the password by changing the secret and resetting it on the VM
 (**Reset password** in the portal); redeploying does not change the password of an existing VM.
 
 Connect: Azure portal > `vm-jumpbox-swe` > **Connect** > **Connect via Bastion**, enter `azureuser` and

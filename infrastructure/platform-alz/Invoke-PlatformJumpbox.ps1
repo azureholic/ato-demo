@@ -77,7 +77,7 @@ function Install-JumpboxTools {
 
 function Test-JumpboxConnectivity {
     $path = Join-Path $OutputPath 'jumpbox-check.ps1'
-    Set-Content $path "& 'C:\ProgramData\jumpbox\hub-check.ps1'"
+    Set-Content $path "& 'C:\ProgramData\jumpbox\hub-check.ps1'; & 'C:\ProgramData\jumpbox\activation-check.ps1'"
     $text = Invoke-VmScript $path
     $lines = @($text -split "`n" | Where-Object { $_ -match '\[(private|PUBLIC|unresolved)\]' })
     $lines | ForEach-Object { Write-Host $_.Trim() }
@@ -89,6 +89,14 @@ function Test-JumpboxConnectivity {
         throw "Not every endpoint is privately reachable from the jumpbox:`n$($bad -join "`n")"
     }
     Write-Host 'Verified from the jumpbox: every endpoint resolves privately and answers over HTTPS.'
+
+    $activation = @($text -split "`n" | Where-Object { $_ -match '^(activation|imds-chain|kms )' } | ForEach-Object { $_.Trim() })
+    $activation | ForEach-Object { Write-Host $_ }
+    $failed = @($activation | Where-Object { $_ -match 'NotLicensed|FAIL|BLOCKED' })
+    if ($activation.Count -lt 4 -or $failed.Count -gt 0) {
+        throw "Windows activation checks failed; the VM would show the 'deactivated' pop-up. Allow Azure KMS (TCP 1688) and the certificate/OCSP endpoints (HTTP 80) in jumpbox-egress.bicep.`n$($activation -join "`n")"
+    }
+    Write-Host 'Verified from the jumpbox: Windows is licensed and its IMDS attestation chain validates.'
 }
 
 $templates = Build-Templates
