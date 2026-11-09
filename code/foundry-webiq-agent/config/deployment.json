@@ -23,8 +23,8 @@
   "model": {
     "name": "gpt-6-astra",
     "version": "2026-09-03",
-    "tokensPerMinute": 10000,
-    "monthlyTokenQuota": 1000000
+    "tokensPerMinute": 100000,
+    "monthlyTokenQuota": 10000000
   },
   "webIq": {
     "connectionName": "web-iq-mcp",

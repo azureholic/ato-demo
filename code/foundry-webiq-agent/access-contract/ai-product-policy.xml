@@ -8,9 +8,9 @@
 
         <!-- Capacity: per-subscription throttle and monthly quota. Keep in sync with config/deployment.json. -->
         <llm-token-limit counter-key="@(context.Subscription.Id)"
-                         tokens-per-minute="10000"
+                         tokens-per-minute="100000"
                          estimate-prompt-tokens="false"
-                         token-quota="1000000"
+                         token-quota="10000000"
                          token-quota-period="Monthly" />
 
         <set-variable name="enableResponseHeaders" value="@(true)" />

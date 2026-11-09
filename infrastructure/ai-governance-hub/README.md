@@ -57,7 +57,7 @@ Initial scenario:
 | Monitoring | Dedicated Log Analytics workspace |
 | Foundry backends | Poland Central (primary) and Sweden Central |
 | Shared model | `gpt-6-astra`, version `2026-09-03` |
-| Model SKU/capacity | GlobalStandard, 10 units **per region** |
+| Model SKU/capacity | GlobalStandard, 100 units **per region** (100K tokens/min, 100 requests/min). 10 units failed agent runs with `rate_limit_exceeded`: one follow-up call carrying Web IQ results is about 13K tokens |
 | Optional extras | Redis, AI Search, Document Intelligence, API Center, realtime and dashboards disabled |
 
 Both deployments share one model definition. The parameter overlay adds explicit
