@@ -240,10 +240,16 @@ and run validation before updating the commit; do not replace it with `main`.
   monitoring incur charges. Confirm model availability and capacity in both
   regions and all required resource providers using the
   [full deployment guide](https://github.com/Azure-Samples/ai-hub-gateway-solution-accelerator/blob/main/guides/full-deployment-guide.md).
-- APIM and Logic App website/SCM access remain public so a hosted runner can
-  publish the application. Key Vault, Cosmos DB and Foundry use upstream private
-  connectivity; Event Hubs retains the public access required by upstream
-  StandardV2 provisioning. This is not a private-only production configuration.
+- The APIM gateway has **no public endpoint** (`apimV2PublicNetworkAccess = false`).
+  It is reachable only through its private endpoint in the Hub spoke, whose A record
+  lives in the shared `privatelink.azure-api.net` zone (owned by the platform DNS
+  deployment). Spokes that must call it need a link to that zone and a firewall rule
+  to the gateway FQDN; the agent spoke has both. APIM itself is deployed through ARM,
+  which this setting does not affect, but its data plane, developer portal and test
+  console are private-only. The Logic App website/SCM access remains public so a hosted
+  runner can publish the application. Key Vault, Cosmos DB and Foundry use upstream
+  private connectivity; Event Hubs retains the public access required by upstream
+  StandardV2 provisioning. This is not yet a fully private production configuration.
 - Gateway consumer Entra authentication is separate from deployment OIDC and
   is disabled here. Use access contracts and configure consumer authentication
   before exposing the gateway to applications.

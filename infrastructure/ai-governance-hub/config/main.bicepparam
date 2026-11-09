@@ -30,7 +30,7 @@ param foundryNetworkInjectionEnabled = false
 param useExistingLogAnalytics = false
 
 param apimV2UsePrivateEndpoint = true
-param apimV2PublicNetworkAccess = true
+param apimV2PublicNetworkAccess = false
 param logicAppUsePrivateEndpoint = false
 param logicAppPublicNetworkAccess = true
 param cosmosDbPublicAccess = 'Disabled'

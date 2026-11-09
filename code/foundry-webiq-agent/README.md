@@ -99,8 +99,10 @@ Not tested against live Azure. Before first use, confirm in order:
 
 1. **Gateway reachability.** Connected-model inference originates from Foundry's managed inference
    plane, not the delegated agent subnet ([Microsoft guidance](https://learn.microsoft.com/azure/foundry/agents/how-to/ai-gateway)).
-   The Hub's APIM gateway endpoint is public, and a Foundry-originated request was observed in the
-   APIM gateway logs, so reachability works for this topology. Re-check if APIM ingress is ever made private.
+   The Hub's APIM gateway has no public endpoint; Foundry reaches it through the Hub-spoke private
+   endpoint (`privatelink.azure-api.net`, agent spoke linked, firewall FQDN rule `private-gateway-443`).
+   An earlier run showed a Foundry-originated request in the APIM logs while the gateway was still public;
+   re-run `ModelCheck` after any networking change to confirm Foundry still reaches it privately.
 2. **Tool calling.** The Hub model must support function/tool calling through the OpenAI-v1
    `universal-llm-api` route (`/models/chat/completions`). The legacy `azure-openai-api` route returned 404
    from the Hub's backends, so the contract uses `universal-llm-api`. Run `ModelCheck` to verify.

@@ -211,6 +211,7 @@ try {
     Assert (@($state.Calls | Where-Object { $_ -like 'az deployment *' -or $_ -like 'az group *' -or $_ -like 'az provider *' }).Count -eq 0) 'Validation must not register providers or deploy networking/DNS.'
     $overlay = Get-Content (Join-Path $testRoot 'validate\bicep\infra\main.bicepparam') -Raw
     Assert ($overlay -ceq (Get-Content (Join-Path $configPath 'main.bicepparam') -Raw)) 'The exact scenario parameters must replace upstream defaults.'
+    Assert ($overlay -match '(?m)^param apimV2UsePrivateEndpoint = true\r?$' -and $overlay -match '(?m)^param apimV2PublicNetworkAccess = false\r?$') 'The APIM gateway must stay private-endpoint-only.'
     $copied = Get-Content (Join-Path $testRoot 'validate\bicep\infra\deployment.json') -Raw | ConvertFrom-Json
     Assert ($copied.model.name -eq $originalConfig.model.name) 'The model configuration must accompany the parameter overlay.'
     $copiedDns = Get-Content (Join-Path $testRoot 'validate\bicep\infra\private-dns.json') -Raw
