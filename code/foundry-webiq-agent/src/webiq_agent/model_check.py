@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import FunctionTool, PromptAgentDefinition
+from azure.ai.projects.models import FunctionTool, PromptAgentDefinition, Reasoning
 from azure.core.exceptions import HttpResponseError
 from azure.identity import DefaultAzureCredential
 
@@ -86,7 +86,10 @@ def main(argv: list[str] | None = None) -> int:
             agent = project.agents.create_version(
                 agent_name=name,
                 definition=PromptAgentDefinition(
-                    model=config.model_deployment, instructions=INSTRUCTIONS, tools=[check_tool()]
+                    model=config.model_deployment,
+                    instructions=INSTRUCTIONS,
+                    tools=[check_tool()],
+                    reasoning=Reasoning(effort=config.reasoning_effort),
                 ),
                 description="Model-path connectivity check; safe to ignore.",
             )

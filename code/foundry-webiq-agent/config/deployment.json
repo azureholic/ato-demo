@@ -36,6 +36,7 @@
     "name": "web-research-agent",
     "description": "Read-only public-web research assistant: Web IQ evidence, models via the AI Governance Hub.",
     "instructionsFile": "agent/instructions.md",
-    "requireApproval": "always"
+    "requireApproval": "always",
+    "reasoningEffort": "none"
   }
 }

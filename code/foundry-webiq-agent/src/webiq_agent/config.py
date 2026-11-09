@@ -14,6 +14,7 @@ DEFAULT_CONFIG = PROJECT_ROOT / "config" / "deployment.json"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$")
 _ENDPOINT = re.compile(r"^https://[a-z0-9-]+\.services\.ai\.azure\.com/api/projects/[A-Za-z0-9_-]+/?$")
 _APPROVAL_MODES = {"always"}
+_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
 class ConfigError(ValueError):
@@ -26,6 +27,7 @@ class AgentConfig:
     description: str
     instructions_path: Path
     require_approval: str
+    reasoning_effort: str
     model_connection: str
     model_name: str
     web_iq_connection: str
@@ -57,6 +59,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG) -> AgentConfig:
             description=agent["description"],
             instructions_path=(path.parent.parent / agent["instructionsFile"]).resolve(),
             require_approval=agent["requireApproval"],
+            reasoning_effort=agent["reasoningEffort"],
             # Mirrors the connection name the Citadel contract creates: '<prefix>-<service code>'.
             model_connection=f"{contract['connectionNamePrefix']}-LLM",
             model_name=model["name"],
@@ -83,6 +86,8 @@ def _validate(config: AgentConfig) -> None:
             raise ConfigError(f"{label} {value!r} is not a valid Foundry name.")
     if config.require_approval not in _APPROVAL_MODES:
         raise ConfigError("agent.requireApproval must be 'always'; relax it only after review.")
+    if config.reasoning_effort not in _REASONING_EFFORTS:
+        raise ConfigError(f"agent.reasoningEffort must be one of {sorted(_REASONING_EFFORTS)}.")
     if not config.web_iq_server_url.startswith("https://"):
         raise ConfigError("webIq.serverUrl must use https.")
     if not config.web_iq_allowed_tools or not all(isinstance(t, str) and t for t in config.web_iq_allowed_tools):
