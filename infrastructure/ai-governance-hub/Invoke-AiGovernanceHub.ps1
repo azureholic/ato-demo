@@ -224,6 +224,7 @@ try {
     Invoke-CheckedCommand azd @('provision', '--environment', $config.environmentName, '--no-prompt')
     & (Join-Path $PSScriptRoot 'Set-LogicAppStorageExemption.ps1') -ConfigPath $ConfigPath
     Invoke-CheckedCommand azd @('deploy', '--environment', $config.environmentName, '--no-prompt')
+    & (Join-Path $PSScriptRoot 'Set-ApimPrivateAccess.ps1') -ConfigPath $ConfigPath
 } finally {
     Set-Location $previousLocation
 }

@@ -33,6 +33,8 @@ No Terraform or external deployment state storage is needed.
 - [Set-LogicAppStorageExemption.ps1](Set-LogicAppStorageExemption.ps1): create or
   verify the runtime storage waiver, restore key access and restart the Logic App
   when the waiver or account changes.
+- [Set-ApimPrivateAccess.ps1](Set-ApimPrivateAccess.ps1): after deployment, verify
+  the APIM private endpoint and shared DNS record, then disable public network access.
 - [spoke.bicep](networking/spoke.bicep) and [peering.bicep](networking/peering.bicep):
   small integration templates reusing the pinned upstream VNet module.
 - [private-dns-links.bicep](../platform-alz/config/private-dns-links.bicep):
@@ -240,16 +242,21 @@ and run validation before updating the commit; do not replace it with `main`.
   monitoring incur charges. Confirm model availability and capacity in both
   regions and all required resource providers using the
   [full deployment guide](https://github.com/Azure-Samples/ai-hub-gateway-solution-accelerator/blob/main/guides/full-deployment-guide.md).
-- The APIM gateway has **no public endpoint** (`apimV2PublicNetworkAccess = false`).
-  It is reachable only through its private endpoint in the Hub spoke, whose A record
-  lives in the shared `privatelink.azure-api.net` zone (owned by the platform DNS
-  deployment). Spokes that must call it need a link to that zone and a firewall rule
-  to the gateway FQDN; the agent spoke has both. APIM itself is deployed through ARM,
-  which this setting does not affect, but its data plane, developer portal and test
-  console are private-only. The Logic App website/SCM access remains public so a hosted
-  runner can publish the application. Key Vault, Cosmos DB and Foundry use upstream
-  private connectivity; Event Hubs retains the public access required by upstream
-  StandardV2 provisioning. This is not yet a fully private production configuration.
+- The APIM gateway ends up with **no public endpoint**. Azure cannot disable public
+  access while APIM is being created, so provisioning keeps the upstream default and
+  [Set-ApimPrivateAccess.ps1](Set-ApimPrivateAccess.ps1) disables it at the end of every
+  deploy run. It refuses to do so unless exactly one v2 APIM instance has an approved
+  private endpoint and the shared `privatelink.azure-api.net` zone holds a private A
+  record for it, then checks that the public gateway rejects outside callers (a warning,
+  not a failure, if the runner cannot observe that). Reruns of `azd provision` briefly
+  re-open public access until this step runs again. The private endpoint registers its
+  record in the platform-owned zone; spokes that call the gateway need a link to that
+  zone and a firewall rule to the gateway FQDN (the agent spoke has both). The data plane,
+  developer portal and test console are private-only, so test calls must come from a
+  linked network. The Logic App website/SCM access remains public so a hosted runner can
+  publish the application. Key Vault, Cosmos DB and Foundry use upstream private
+  connectivity; Event Hubs retains the public access required by upstream StandardV2
+  provisioning. This is not yet a fully private production configuration.
 - Gateway consumer Entra authentication is separate from deployment OIDC and
   is disabled here. Use access contracts and configure consumer authentication
   before exposing the gateway to applications.

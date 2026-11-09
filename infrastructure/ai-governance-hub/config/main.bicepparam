@@ -30,7 +30,9 @@ param foundryNetworkInjectionEnabled = false
 param useExistingLogAnalytics = false
 
 param apimV2UsePrivateEndpoint = true
-param apimV2PublicNetworkAccess = false
+// Azure cannot disable APIM public access during creation. Provision with the upstream default and let
+// Set-ApimPrivateAccess.ps1 disable it afterwards, once the private endpoint and DNS record exist.
+param apimV2PublicNetworkAccess = true
 param logicAppUsePrivateEndpoint = false
 param logicAppPublicNetworkAccess = true
 param cosmosDbPublicAccess = 'Disabled'

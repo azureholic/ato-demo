@@ -11,7 +11,7 @@ New-Item $configPath -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $root 'config\main.bicepparam') $configPath
 $state = @{
     Failure = ''; Calls = [Collections.Generic.List[string]]::new(); ProviderReads = 0
-    Exemption = $null; SharedKey = $false
+    Exemption = $null; SharedKey = $false; ApimPublicAccess = 'Enabled'
     StorageScope = "/subscriptions/$($originalConfig.subscriptionId)/resourceGroups/$($originalConfig.resourceGroupName)/providers/Microsoft.Storage/storageAccounts/funcusagetest123"
 }
 $previousLocation = Get-Location
@@ -100,6 +100,25 @@ function az {
         return
     }
     if ($args[0] -eq 'webapp') { return }
+    if ($args[0] -eq 'apim') {
+        if ($args[1] -eq 'list') {
+            ConvertTo-Json -InputObject @(if ($state.Failure -eq 'apim-multiple') { 'apim-a'; 'apim-b' } else { 'apim-govhub-test' })
+        } else {
+            @{
+                sku = if ($state.Failure -eq 'apim-classic') { 'Developer' } else { 'StandardV2' }
+                state = 'Succeeded'
+                publicNetworkAccess = $state.ApimPublicAccess
+                gatewayUrl = 'https://apim-govhub-test.azure-api.net'
+                endpoints = if ($state.Failure -eq 'apim-no-endpoint') { $null } else { @('Approved') }
+            } | ConvertTo-Json
+        }
+        return
+    }
+    if ($args[0] -eq 'rest') {
+        if ($args[2] -ne 'patch' -and $args[1] -ne '--method') { throw 'APIM access must only be changed with a PATCH.' }
+        $state.ApimPublicAccess = 'Disabled'
+        return
+    }
     if ($args[0] -eq 'provider') {
         if ($args[1] -eq 'show') {
             if ($state.Failure -eq 'provider-read') { $global:LASTEXITCODE = 17; return }
@@ -130,6 +149,10 @@ function az {
         return
     }
     if ($args[0] -eq 'network') {
+        if ($args[1] -eq 'private-dns' -and $args[2] -eq 'record-set') {
+            ConvertTo-Json -InputObject @(if ($state.Failure -eq 'apim-no-dns') { } elseif ($state.Failure -eq 'apim-public-dns') { '20.1.2.3' } else { '10.170.0.82' })
+            return
+        }
         if ($args[1] -eq 'private-dns') {
             $zones = @($platformDns.zones.PSObject.Properties.Value | ForEach-Object { @{ name = $_ } })
             if ($state.Failure -eq 'missing-dns-zones') { $zones = @() }
@@ -172,6 +195,10 @@ function azd {
     }
     if ($state.Failure -eq $args[0]) { $global:LASTEXITCODE = 29 }
 }
+function Invoke-WebRequest {
+    $state.Calls.Add("web $($args -join ' ')")
+    [pscustomobject]@{ StatusCode = 404; Content = '{ "statusCode": 403, "message": "Request originated from client public IP address 203.0.113.5, public network access on this `Microsoft.ApiManagement/service/apim-govhub-test` is disabled." }' }
+}
 function Assert {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
@@ -182,6 +209,7 @@ function Invoke-Case {
     $state.Failure = $Failure
     $state.Exemption = $null
     $state.SharedKey = $false
+    $state.ApimPublicAccess = 'Enabled'
     $originalConfig | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $configPath 'deployment.json')
     $path = Join-Path $testRoot $Name
     if ($Name -eq 'existing') { New-Item $path -ItemType Directory | Out-Null }
@@ -211,7 +239,7 @@ try {
     Assert (@($state.Calls | Where-Object { $_ -like 'az deployment *' -or $_ -like 'az group *' -or $_ -like 'az provider *' }).Count -eq 0) 'Validation must not register providers or deploy networking/DNS.'
     $overlay = Get-Content (Join-Path $testRoot 'validate\bicep\infra\main.bicepparam') -Raw
     Assert ($overlay -ceq (Get-Content (Join-Path $configPath 'main.bicepparam') -Raw)) 'The exact scenario parameters must replace upstream defaults.'
-    Assert ($overlay -match '(?m)^param apimV2UsePrivateEndpoint = true\r?$' -and $overlay -match '(?m)^param apimV2PublicNetworkAccess = false\r?$') 'The APIM gateway must stay private-endpoint-only.'
+    Assert ($overlay -match '(?m)^param apimV2UsePrivateEndpoint = true\r?$') 'APIM needs its private endpoint before public access can be disabled.'
     $copied = Get-Content (Join-Path $testRoot 'validate\bicep\infra\deployment.json') -Raw | ConvertFrom-Json
     Assert ($copied.model.name -eq $originalConfig.model.name) 'The model configuration must accompany the parameter overlay.'
     $copiedDns = Get-Content (Join-Path $testRoot 'validate\bicep\infra\private-dns.json') -Raw
@@ -258,6 +286,35 @@ try {
     Assert ($provisionIndex -lt $waiverIndex -and $waiverIndex -lt $updateIndex -and $updateIndex -lt $restartIndex -and $restartIndex -lt $deployIndex) 'Create the waiver, restore keys and restart only between provisioning and application deployment.'
     Assert ($calls[$waiverIndex].Contains("--scope $($state.StorageScope) ") -and $calls[$waiverIndex].Contains('--policy-definition-reference-ids StorageAccountDisableLocalAuth ') -and -not $calls[$waiverIndex].Contains('--expires-on')) 'The approved no-expiry waiver must target only the runtime account and shared-key policy.'
     Assert (-not $calls[$updateIndex].Contains('--public-network-access')) 'Repair must not enable public storage access.'
+
+    $deployIndex = [array]::FindIndex($calls, [Predicate[string]]{ param($call) $call -like 'azd deploy *' })
+    $patchIndex = [array]::FindIndex($calls, [Predicate[string]]{ param($call) $call -like 'az rest *--method patch*' })
+    Assert ($patchIndex -gt $deployIndex) 'Public APIM access must be disabled only after provisioning and application deployment.'
+    Assert ($calls[$patchIndex].Contains('/providers/Microsoft.ApiManagement/service/apim-govhub-test?api-version=') -and $state.ApimPublicAccess -eq 'Disabled') 'Disable public access on the single discovered APIM instance.'
+    Assert (@($calls | Where-Object { $_ -like 'web *' }).Count -ge 1) 'Verify that the public gateway rejects callers.'
+
+    $state.Calls.Clear()
+    & (Join-Path $root 'Set-ApimPrivateAccess.ps1') -ConfigPath $configPath -PollIntervalSeconds 1 -ProbeTimeoutSeconds 1
+    Assert (@($state.Calls | Where-Object { $_ -like 'az rest *' }).Count -eq 0) 'Already-private APIM must cause no writes.'
+
+    foreach ($failure in 'apim-no-endpoint', 'apim-no-dns', 'apim-public-dns', 'apim-multiple', 'apim-classic') {
+        $expected = switch ($failure) {
+            apim-no-endpoint { 'no approved private endpoint' }
+            apim-no-dns { 'must hold a private A record' }
+            apim-public-dns { 'must hold a private A record' }
+            apim-multiple { 'exactly one API Management instance' }
+            apim-classic { 'must be a v2 tier' }
+        }
+        $state.Failure = $failure
+        $state.ApimPublicAccess = 'Enabled'
+        $state.Calls.Clear()
+        $caught = $null
+        try { & (Join-Path $root 'Set-ApimPrivateAccess.ps1') -ConfigPath $configPath -PollIntervalSeconds 1 -ProbeTimeoutSeconds 1 } catch { $caught = $_.Exception.Message }
+        Assert ($null -ne $caught -and $caught.Contains($expected)) "$failure should fail with '$expected', got '$caught'."
+        Assert (@($state.Calls | Where-Object { $_ -like 'az rest *' }).Count -eq 0) 'Unverified APIM must not have public access disabled.'
+    }
+    $state.Failure = ''
+    $state.ApimPublicAccess = 'Enabled'
 
     $state.Calls.Clear()
     & (Join-Path $root 'Set-LogicAppStorageExemption.ps1') -ConfigPath $configPath
