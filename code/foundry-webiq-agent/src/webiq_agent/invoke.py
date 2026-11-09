@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -37,6 +38,12 @@ def collect_citations(response: Any) -> list[str]:
                 url = getattr(annotation, "url", None)
                 if getattr(annotation, "type", "") == "url_citation" and url and url not in urls:
                     urls.append(url)
+    if not urls:
+        # Models behind a gateway cite MCP tool results inline as links, without structured annotations.
+        for url in re.findall(r"https?://[^\s)\]>\"']+", getattr(response, "output_text", "") or ""):
+            url = url.rstrip(".,;")
+            if url not in urls:
+                urls.append(url)
     return urls
 
 

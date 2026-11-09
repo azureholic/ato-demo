@@ -95,6 +95,12 @@ def test_citations_are_deduplicated_url_citations():
     assert collect_citations(response) == ["https://a.example", "https://b.example"]
 
 
+def test_inline_links_are_used_when_the_model_returns_no_annotations():
+    text = "See [Learn](https://learn.microsoft.com/web-iq/overview) and https://example.com/a, again https://example.com/a."
+    response = SimpleNamespace(output=[SimpleNamespace(type="message", content=[SimpleNamespace(annotations=[])])], output_text=text)
+    assert collect_citations(response) == ["https://learn.microsoft.com/web-iq/overview", "https://example.com/a"]
+
+
 class FakeOpenAI:
     def __init__(self, responses):
         self.responses_queue = list(responses)
