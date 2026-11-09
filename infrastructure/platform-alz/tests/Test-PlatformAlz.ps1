@@ -187,7 +187,7 @@ function Assert-Failure {
 }
 
 function Test-ModuleInstallRetries {
-    $workflow = Get-Content (Join-Path $root '..\.github\workflows\alz-deploy.yml') -Raw | ConvertFrom-Yaml
+    $workflow = Get-Content (Join-Path $root '..\..\.github\workflows\alz-deploy.yml') -Raw | ConvertFrom-Yaml
     $installStep = @($workflow.jobs.deploy.steps | Where-Object name -eq 'Install ALZ PowerShell dependencies')
     if ($installStep.Count -ne 1) { throw 'Expected exactly one module installation step.' }
     $installScript = [scriptblock]::Create($installStep[0].run)
@@ -302,7 +302,7 @@ function Test-PlatformDns {
     }
     $dnsTestState.Failure = 'implicit-dns'
     & $dnsAdapter -OutputPath (Join-Path $testRoot 'dns-implicit')
-    $workflow = Get-Content (Join-Path $root '..\.github\workflows\alz-deploy.yml') -Raw | ConvertFrom-Yaml
+    $workflow = Get-Content (Join-Path $root '..\..\.github\workflows\alz-deploy.yml') -Raw | ConvertFrom-Yaml
     $stepNames = @($workflow.jobs.deploy.steps.name)
     $alzIndex = [array]::IndexOf($stepNames, 'Generate from repository configuration and run official local deployment')
     $refreshIndex = [array]::IndexOf($stepNames, 'Refresh Azure CLI login for shared platform DNS')

@@ -21,6 +21,7 @@ jobs:
     defaults:
       run:
         shell: pwsh
+        working-directory: infrastructure
     steps:
       - name: Checkout scenario configuration
         uses: actions/checkout@v4

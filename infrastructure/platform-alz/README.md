@@ -1,6 +1,6 @@
 # SMB platform landing zone - Bicep Accelerator
 
-The [platform workflow](../.github/workflows/alz-deploy.yml) runs on a public
+The [platform workflow](../../.github/workflows/alz-deploy.yml) runs on a public
 GitHub-hosted Windows runner. **No state storage account, public state-storage
 endpoint, Blob state access or remote Terraform state is required.**
 
@@ -55,7 +55,7 @@ stacks: keep `deployPrivateDnsZones: false` in the upstream hub parameters to
 avoid duplicate ownership. Existing zones, DNS records and unrelated links are
 preserved; no deletion or resource move is needed for this handover.
 
-The [GovHub workflow](../.github/workflows/ai-governance-hub-deploy.yml) consumes
+The [GovHub workflow](../../.github/workflows/ai-governance-hub-deploy.yml) consumes
 the same platform DNS configuration, requires existing zones and creates only
 its spoke's links and private-endpoint DNS associations. Both workflows use the
 same link names, so platform redeployment does not create duplicate links.
@@ -73,7 +73,7 @@ links existing zones. All workloads sharing the private-monitoring DNS network
 reuse one AMPLS rather than creating competing scopes.
 
 For an existing platform, run the separately approved
-[workload connectivity workflow](../.github/workflows/platform-workload-connectivity.yml)
+[workload connectivity workflow](../../.github/workflows/platform-workload-connectivity.yml)
 to add these zones and scoped egress rules without rerunning the full Accelerator.
 The firewall source CIDRs and package/control-plane allow-list are version-controlled
 in [workload-egress.json](config/workload-egress.json). New spokes use Azure-provided
@@ -158,10 +158,10 @@ platform subscription, create VNet links, and read/join VNets in every
 itself these permissions. Shared DNS configuration now belongs entirely to
 the platform; do not change deployed resource-ID casing during migration.
 
-For a local platform deployment, run `Invoke-PlatformAlz.ps1` first, then:
+For a local platform deployment, run `Invoke-PlatformAlz.ps1` first, then from the repository root:
 
 ```powershell
-.\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:TEMP\platform-dns"
+.\infrastructure\platform-alz\Invoke-PlatformDns.ps1 -OutputPath "$env:TEMP\platform-dns"
 ```
 
 Use `-ValidateOnly` on the DNS adapter for offline compilation without Azure
@@ -257,11 +257,11 @@ locally at the same time as GitHub Actions.
 ## Local use and tests
 
 With PowerShell 7.4+, Azure CLI, Bicep CLI on `PATH`, the pinned modules, and
-matching authenticated **Azure CLI and Az PowerShell** contexts:
+matching authenticated **Azure CLI and Az PowerShell** contexts, run from the repository root:
 
 ```powershell
 Import-Module ALZ -RequiredVersion 7.1.5
-.\platform-alz\Invoke-PlatformAlz.ps1 -OutputPath "$env:TEMP\platform-alz-new-run"
+.\infrastructure\platform-alz\Invoke-PlatformAlz.ps1 -OutputPath "$env:TEMP\platform-alz-new-run"
 ```
 
 Set `ARM_CLIENT_ID`, `ARM_TENANT_ID` and `ARM_SUBSCRIPTION_ID` to the matching
@@ -275,7 +275,7 @@ unchanged. That switch requires GitHub's `ACTIONS_ID_TOKEN_REQUEST_URL` and
 Run the orchestration tests without Azure access or resource changes:
 
 ```powershell
-.\platform-alz\tests\Test-PlatformAlz.ps1
+.\infrastructure\platform-alz\tests\Test-PlatformAlz.ps1
 ```
 
 The previous custom Bicep orchestration remains in [alz](../alz) as a legacy

@@ -16,6 +16,7 @@ jobs:
     defaults:
       run:
         shell: pwsh
+        working-directory: infrastructure
     steps:
       - uses: actions/checkout@v4
         with:

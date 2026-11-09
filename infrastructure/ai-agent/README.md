@@ -35,13 +35,13 @@ It never deletes the shared hub, platform DNS or Governance Hub.
 ## Deployment order
 
 1. Provision platform workload DNS and egress using
-   [the connectivity workflow](../.github/workflows/platform-workload-connectivity.yml).
+   [the connectivity workflow](../../.github/workflows/platform-workload-connectivity.yml).
    This adds required zones and a dedicated firewall rule collection group.
 2. Initialize the GitHub App and deploy/verify [the reusable runner](../github-runner/README.md).
    Its bootstrap workflow prepares the agent spoke and both direct spoke peerings.
 3. Set `HOSTED_AGENT_RESOURCE_SCOPE` in the protected GitHub `demo` environment
    to the approved delegated Foundry audience followed by `/.default`.
-4. Run [the foundation workflow](../.github/workflows/ai-agent-deploy.yml) from `main`.
+4. Run [the foundation workflow](../../.github/workflows/ai-agent-deploy.yml) from `main`.
    Network preparation runs on a hosted runner; Bicep and data-plane hooks run on
       the ephemeral `private-azure` runner. The workflow directs azd to the runner's
       pinned Bicep binary instead of downloading another copy. Required reviewers
@@ -55,9 +55,11 @@ reads its App key; Azure deployment uses GitHub OIDC.
 
 ## Local validation
 
+Run these commands from the repository root:
+
 ```powershell
-.\shared-infrastructure\tests\Test-Deployment.ps1
-.\ai-agent\Invoke-AiAgent.ps1 -Mode Validate -OutputPath "$env:TEMP\agent-validation"
+.\infrastructure\shared-infrastructure\tests\Test-Deployment.ps1
+.\infrastructure\ai-agent\Invoke-AiAgent.ps1 -Mode Validate -OutputPath "$env:TEMP\agent-validation"
 ```
 
 Use a fresh output directory. Validate compiles Bicep and checks overlay parameter names,

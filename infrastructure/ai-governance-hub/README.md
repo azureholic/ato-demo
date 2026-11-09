@@ -4,7 +4,7 @@ This folder adopts the MIT-licensed
 [AI Hub Gateway Solution Accelerator (Citadel)](https://github.com/Azure-Samples/ai-hub-gateway-solution-accelerator)
 without vendoring its infrastructure, policies or application code.
 
-The [manual workflow](../.github/workflows/ai-governance-hub-deploy.yml) uses the
+The [manual workflow](../../.github/workflows/ai-governance-hub-deploy.yml) uses the
 existing `demo` approval environment and OIDC application, just like the ALZ
 workflow. It clones a **pinned upstream commit into runner temporary storage**,
 copies our configuration into the checkout, compiles the networking and GovHub
@@ -264,10 +264,10 @@ and run validation before updating the commit; do not replace it with `main`.
 ## Local validation and tests
 
 PowerShell 7.4+, Git and Azure CLI with Bicep CLI are required for real compilation.
-No Azure login is required for **Validate**:
+No Azure login is required for **Validate**. Run these commands from the repository root:
 
 ```powershell
-.\ai-governance-hub\Invoke-AiGovernanceHub.ps1 -OutputPath "$env:TEMP\ai-governance-hub-new-run"
+.\infrastructure\ai-governance-hub\Invoke-AiGovernanceHub.ps1 -OutputPath "$env:TEMP\ai-governance-hub-new-run"
 ```
 
 Always use a fresh output directory. The compiled template and parameters remain
@@ -277,13 +277,13 @@ Register providers first; then explicitly choose `-Mode Network` or `-Mode Deplo
 Full Deploy also requires `azd auth login`. There is no local approval prompt:
 
 ```powershell
-$config = Get-Content .\ai-governance-hub\config\deployment.json -Raw | ConvertFrom-Json
-.\ai-governance-hub\Register-ResourceProviders.ps1 -SubscriptionId $config.subscriptionId
-.\ai-governance-hub\Invoke-AiGovernanceHub.ps1 -OutputPath "$env:TEMP\govhub-network-new-run" -Mode Network
+$config = Get-Content .\infrastructure\ai-governance-hub\config\deployment.json -Raw | ConvertFrom-Json
+.\infrastructure\ai-governance-hub\Register-ResourceProviders.ps1 -SubscriptionId $config.subscriptionId
+.\infrastructure\ai-governance-hub\Invoke-AiGovernanceHub.ps1 -OutputPath "$env:TEMP\govhub-network-new-run" -Mode Network
 ```
 
 Run focused orchestration tests without Azure access, clones or installed modules:
 
 ```powershell
-.\ai-governance-hub\tests\Test-AiGovernanceHub.ps1
+.\infrastructure\ai-governance-hub\tests\Test-AiGovernanceHub.ps1
 ```

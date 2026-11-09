@@ -22,10 +22,10 @@ for Docker builds, not a Docker daemon on the runner.
 
 ## GitHub App setup
 
-Run interactively with authenticated `gh`:
+Run interactively from the repository root with authenticated `gh`:
 
 ```powershell
-.\github-runner\Initialize-GitHubApp.ps1 -GitHubUser azureholic
+.\infrastructure\github-runner\Initialize-GitHubApp.ps1 -GitHubUser azureholic
 ```
 
 Approve the manifest and install the App **only on this repository** in the browser.
@@ -64,16 +64,16 @@ process environment before workflows run. Scaling uses a managed-identity Key Va
 ## Bootstrap and verification
 
 1. Configure `demo` reviewers and existing Azure OIDC variables.
-   Provision [platform DNS and egress](../.github/workflows/platform-workload-connectivity.yml)
+   Provision [platform DNS and egress](../../.github/workflows/platform-workload-connectivity.yml)
    first. The previous Italy VNet must remain unpeered because its address range
    overlaps the new agent spoke.
-2. Run [the runner deployment workflow](../.github/workflows/github-runner-deploy.yml)
+2. Run [the runner deployment workflow](../../.github/workflows/github-runner-deploy.yml)
    from `main`. It prepares the agent spoke, creates runner infrastructure, links
    existing zones, peers directly to workload VNets, builds privately and enables scaling.
-3. Run [the smoke workflow](../.github/workflows/github-runner-smoke.yml).
+3. Run [the smoke workflow](../../.github/workflows/github-runner-smoke.yml).
    A queued job must start a runner and pass private DNS/TCP/TLS checks.
    A provisioned Azure Job alone does not prove runner readiness.
-4. Run [the agent foundation workflow](../.github/workflows/ai-agent-deploy.yml).
+4. Run [the agent foundation workflow](../../.github/workflows/ai-agent-deploy.yml).
 
 Bootstrap uses an ARM `secureString` parameter, removes its temporary parameter
 file on failure, and never uploads generated contexts as workflow artifacts.
@@ -93,10 +93,12 @@ make untrusted workflow code safe.
 
 ## Validation and troubleshooting
 
+Run these commands from the repository root:
+
 ```powershell
-.\shared-infrastructure\tests\Test-Deployment.ps1
-.\github-runner\Invoke-GitHubRunner.ps1 -Mode Validate -OutputPath "$env:TEMP\runner-validation"
-python -m unittest discover -s .\github-runner\tests
+.\infrastructure\shared-infrastructure\tests\Test-Deployment.ps1
+.\infrastructure\github-runner\Invoke-GitHubRunner.ps1 -Mode Validate -OutputPath "$env:TEMP\runner-validation"
+python -m unittest discover -s .\infrastructure\github-runner\tests
 ```
 
 Python tests require `cryptography` (installed in the image).
