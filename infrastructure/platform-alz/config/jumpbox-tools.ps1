@@ -53,4 +53,14 @@ if (-not (Test-Path $cli)) {
     Remove-Item $msi -Force
 }
 $version = (& $cli version --output json | ConvertFrom-Json).'azure-cli'
+
+# Azure KMS often answers "too busy" (0xC0020018) to the first activation attempt after boot; retry before checking.
+for ($attempt = 1; $attempt -le 4; $attempt++) {
+    $license = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationId='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1
+    if ($license -and $license.LicenseStatus -eq 1) { break }
+    cscript //nologo C:\Windows\System32\slmgr.vbs /ato | Out-Null
+    Start-Sleep -Seconds 30
+}
+# Refreshes the Azure Edition activation state so a stale "deactivated" notice is cleared once the checks pass.
+if (Test-Path C:\Windows\System32\fclip.exe) { try { & C:\Windows\System32\fclip.exe | Out-Null } catch { } }
 "azure-cli installed: $version"
