@@ -48,6 +48,16 @@ def _approval_response(request_id: str, approve: bool) -> dict[str, Any]:
     return {"type": "mcp_approval_response", "approval_request_id": request_id, "approve": approve}
 
 
+def _describe(label: str, response: Any) -> None:
+    """Prints item types (and MCP errors) so a failing run shows how far the conversation got."""
+    items = []
+    for item in getattr(response, "output", []) or []:
+        kind = getattr(item, "type", "?")
+        error = getattr(item, "error", None)
+        items.append(f"{kind}({getattr(item, 'name', '')})" + (f" error={error}" if error else ""))
+    print(f"[{label}] status={getattr(response, 'status', '?')} items={items}", file=sys.stderr)
+
+
 def ask_agent(
     openai: Any,
     question: str,
@@ -59,9 +69,10 @@ def ask_agent(
     conversation = openai.conversations.create()
     try:
         response = None
-        for turn in (question, *follow_ups):
+        for number, turn in enumerate((question, *follow_ups), start=1):
             response = openai.responses.create(conversation=conversation.id, input=turn)
-            for _ in range(MAX_APPROVAL_ROUNDS):
+            _describe(f"turn {number}", response)
+            for round_number in range(MAX_APPROVAL_ROUNDS):
                 requests = pending_approvals(response)
                 if not requests:
                     break
@@ -69,6 +80,7 @@ def ask_agent(
                     _approval_response(r.id, decide_approval(r, config, auto_approve, ask)) for r in requests
                 ]
                 response = openai.responses.create(conversation=conversation.id, input=decisions)
+                _describe(f"turn {number} approval {round_number + 1}", response)
             else:
                 raise RuntimeError(f"Agent still requested approvals after {MAX_APPROVAL_ROUNDS} rounds.")
             if getattr(response, "status", "completed") != "completed":
