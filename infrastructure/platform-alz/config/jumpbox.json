@@ -1,0 +1,46 @@
+{
+  "subscriptionId": "6ffc8ff2-3d6f-4a9b-b2f9-3263eedb728c",
+  "location": "swedencentral",
+  "resourceGroupName": "rg-jumpbox-swe",
+  "hub": {
+    "resourceGroupName": "rg-hub-swe",
+    "vnetName": "vnet-hub-swe",
+    "routeTableName": "rt-hub-std-swe",
+    "firewallPolicyName": "afwp-alz-swe"
+  },
+  "subnet": {
+    "name": "snet-jumpbox",
+    "addressPrefix": "10.100.1.0/27"
+  },
+  "nsgName": "nsg-jumpbox-swe",
+  "bastionName": "bas-hub-swe-developer",
+  "vm": {
+    "name": "vm-jumpbox-swe",
+    "size": "Standard_B2s_v2",
+    "adminUsername": "azureuser",
+    "osDiskSku": "StandardSSD_LRS"
+  },
+  "connectivityTargets": [
+    "apim-jmj2kuossnei2.azure-api.net",
+    "aif-ai-agent-demo-itn-001.services.ai.azure.com"
+  ],
+  "egressFqdns": [
+    "login.microsoftonline.com",
+    "*.login.microsoftonline.com",
+    "management.azure.com",
+    "aka.ms",
+    "packages.microsoft.com",
+    "azcliprod.blob.core.windows.net",
+    "azcliextensionsync.blob.core.windows.net",
+    "archive.ubuntu.com",
+    "azure.archive.ubuntu.com",
+    "security.ubuntu.com",
+    "pypi.org",
+    "files.pythonhosted.org"
+  ],
+  "tags": {
+    "deployed_by": "bicep",
+    "source": "platform-alz jumpbox",
+    "environment": "demo"
+  }
+}

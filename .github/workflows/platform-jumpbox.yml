@@ -1,0 +1,54 @@
+name: Deploy platform jumpbox
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: alz-demo-platform
+  cancel-in-progress: false
+
+jobs:
+  jumpbox:
+    name: Hub jumpbox with Bastion Developer (approval required)
+    runs-on: windows-latest
+    environment: demo
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: infrastructure
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify platform deployment gate
+        id: settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          . .\shared-infrastructure\Deployment.ps1
+          Assert-DeploymentGate
+          $config = Get-Content '.\platform-alz\config\jumpbox.json' -Raw | ConvertFrom-Json
+          "subscription-id=$($config.subscriptionId)" >> $env:GITHUB_OUTPUT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.settings.outputs.subscription-id }}
+      - name: Install Bicep CLI
+        run: |
+          az bicep install
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep CLI installation failed.' }
+      - name: Validate templates
+        run: .\platform-alz\Invoke-PlatformJumpbox.ps1 -Mode Validate -OutputPath "$env:RUNNER_TEMP\jumpbox-validate"
+      - name: Deploy jumpbox, firewall egress and verify private reachability
+        env:
+          JUMPBOX_SSH_PUBLIC_KEY: ${{ vars.JUMPBOX_SSH_PUBLIC_KEY }}
+        run: .\platform-alz\Invoke-PlatformJumpbox.ps1 -Mode Deploy -OutputPath "$env:RUNNER_TEMP\jumpbox"

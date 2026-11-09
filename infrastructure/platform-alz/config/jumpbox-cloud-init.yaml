@@ -1,0 +1,30 @@
+#cloud-config
+package_update: true
+packages:
+  - curl
+  - jq
+  - dnsutils
+  - python3-venv
+  - python3-pip
+write_files:
+  - path: /usr/local/bin/hub-check
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Shows whether the private gateway and Foundry endpoints resolve to private addresses and answer over HTTPS.
+      hosts=("$@")
+      [ ${#hosts[@]} -eq 0 ] && hosts=(__TARGETS__)
+      status=0
+      for h in "${hosts[@]}"; do
+        ip=$(getent ahostsv4 "$h" | awk '{print $1}' | head -1)
+        code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "https://$h/" || true)
+        case "$ip" in
+          10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) scope=private ;;
+          '') scope=unresolved; status=1 ;;
+          *) scope=PUBLIC; status=1 ;;
+        esac
+        echo "$h -> ${ip:-none} [$scope] HTTPS GET / => ${code:-000}"
+      done
+      exit $status
+runcmd:
+  - [bash, -c, "curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash || echo 'Azure CLI install skipped' >> /var/log/jumpbox-bootstrap.log"]
