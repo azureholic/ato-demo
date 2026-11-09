@@ -5,7 +5,9 @@ Agent Landing Zone project:
 
 - **Models** come from the [AI Governance Hub](../../infrastructure/ai-governance-hub/README.md)
   through a Citadel **access contract** (Bicep). The contract creates the APIM product,
-  subscription, model/token policy and the Foundry project connection.
+  subscription and model/token policy for the `unified-ai-api`. This project then creates the
+  Foundry project connection pointing at the Hub's OpenAI-compatible base URL
+  (`https://<apim>/unified-ai/v1`, which serves `/chat/completions` and `/responses`).
 - **Web evidence** comes from [Microsoft Web IQ](https://learn.microsoft.com/web-iq/integrations/mcp)
   (`https://api.microsoft.ai/v3/mcp`) attached as a remote MCP tool with approval required.
 - Design rationale, risks and open decisions are in [plan.md](plan.md).
@@ -103,9 +105,11 @@ Not tested against live Azure. Before first use, confirm in order:
    endpoint (`privatelink.azure-api.net`, agent spoke linked, firewall FQDN rule `private-gateway-443`).
    An earlier run showed a Foundry-originated request in the APIM logs while the gateway was still public;
    re-run `ModelCheck` after any networking change to confirm Foundry still reaches it privately.
-2. **Tool calling.** The Hub model must support function/tool calling through the OpenAI-v1
-   `universal-llm-api` route (`/models/chat/completions`). The legacy `azure-openai-api` route returned 404
-   from the Hub's backends, so the contract uses `universal-llm-api`. Run `ModelCheck` to verify.
+2. **Tool calling.** `gpt-6-astra` rejects function tools on Chat Completions, so tool use needs the Responses
+   API upstream. The Hub serves it at `POST /unified-ai/v1/responses` (rewritten to the backend's
+   `/openai/v1/responses`), but Foundry's "Use the Responses API for upstream requests" option wants a base
+   ending `/openai/v1` and its stored setting is not yet identified, so the connection still uses Chat Completions.
+   Run `ModelCheck` after any connection change to verify.
 3. **Web IQ.** The account is entitled to `web`/`browse`, the key works from Foundry's MCP execution
    path, and any firewall egress to `api.microsoft.ai` is approved (it is not in the current
    [workload egress list](../../infrastructure/platform-alz/config/workload-egress.json)).

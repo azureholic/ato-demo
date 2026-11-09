@@ -3,8 +3,9 @@
 .SYNOPSIS
   Deploys the Web IQ prompt agent on the Agent Landing Zone Foundry project with models from the AI Governance Hub.
 .DESCRIPTION
-  Validate  Compile the pinned Citadel access contract overlay and the Web IQ connection template. No Azure calls.
-  Contract  Deploy the Citadel access contract: APIM product/subscription for the Hub model plus the project connection.
+  Validate  Compile the pinned Citadel access contract overlay and both project connection templates. No Azure calls.
+  Contract  Deploy the Citadel access contract (APIM product/subscription/policy for unified-ai-api), then the Hub model
+            project connection with the OpenAI-compatible base URL (https://<apim>/unified-ai/v1).
   WebIq     Deploy the Web IQ MCP project connection. Requires WEBIQ_API_KEY in the environment.
   Agent     Publish a new prompt-agent version, optionally followed by a smoke question that
             auto-approves only the configured Web IQ tools. Needs private data-plane access.
@@ -110,7 +111,8 @@ function Build-Contract {
 Assert-PolicyMatchesConfiguration
 $webIqTemplate = Join-Path $PSScriptRoot 'infra' 'webiq-connection.bicep'
 $webIqParameters = Join-Path $PSScriptRoot 'infra' 'webiq-connection.bicepparam'
-$names = @('HUB_APIM_NAME', 'FOUNDRY_ACCOUNT_NAME', 'FOUNDRY_PROJECT_NAME', 'FOUNDRY_PROJECT_ENDPOINT')
+$hubConnectionParameters = Join-Path $PSScriptRoot 'infra' 'hub-model-connection.bicepparam'
+$names = @('HUB_APIM_NAME', 'HUB_GATEWAY_URL', 'HUB_API_KEY', 'FOUNDRY_ACCOUNT_NAME', 'FOUNDRY_PROJECT_NAME', 'FOUNDRY_PROJECT_ENDPOINT')
 $saved = @{}
 foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
 
@@ -121,16 +123,19 @@ try {
         $env:FOUNDRY_PROJECT_NAME = 'validate-project'
         $paths = Initialize-Contract
         Build-Contract $paths | Out-Null
-        # Compiled parameters embed the secure value, so use a placeholder and keep it out of the repository.
+        # Compiled parameters embed secure values, so use placeholders and keep the output out of the repository.
         $savedKey = $env:WEBIQ_API_KEY
         $env:WEBIQ_API_KEY = 'validate-only'
+        $env:HUB_GATEWAY_URL = 'https://validate.example'
+        $env:HUB_API_KEY = 'validate-only'
         try {
-            Invoke-CheckedCommand az @('bicep', 'build-params', '--file', $webIqParameters, '--outfile', (Join-Path $OutputPath 'webiq.parameters.json'))
+            Invoke-CheckedCommand az @('bicep', 'build-params', '--file', $webIqParameters, '--outfile', (Join-Path $OutputPath 'webiq.parameters.json')) | Out-Null
+            Invoke-CheckedCommand az @('bicep', 'build-params', '--file', $hubConnectionParameters, '--outfile', (Join-Path $OutputPath 'hub-connection.parameters.json')) | Out-Null
         } finally {
             $env:WEBIQ_API_KEY = $savedKey
-            Remove-Item (Join-Path $OutputPath 'webiq.parameters.json') -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $OutputPath 'webiq.parameters.json'), (Join-Path $OutputPath 'hub-connection.parameters.json') -Force -ErrorAction SilentlyContinue
         }
-        Write-Host 'Access contract overlay and Web IQ connection template compiled; no Azure resources changed.'
+        Write-Host 'Access contract overlay and both project connection templates compiled; no Azure resources changed.'
         return
     }
 
@@ -155,7 +160,15 @@ try {
                     Write-Warning "Could not remove deployment record $deployment; its outputs may expose the APIM subscription key. Delete it and rotate the key."
                 }
             }
-            Write-Host "Deployed access contract and project connection $($config.accessContract.connectionNamePrefix)-LLM."
+            $gatewayUrl = (Invoke-CheckedCommand az @('apim', 'show', '--subscription', $config.subscriptionId, '--resource-group', $config.governanceHub.resourceGroupName, '--name', $targets.ApimName, '--query', 'gatewayUrl', '--output', 'tsv') | Out-String).Trim()
+            if ($gatewayUrl -notmatch '^https://[^/\s]+$') { throw "Unexpected gateway URL '$gatewayUrl' for $($targets.ApimName)." }
+            $subscriptionName = "LLM-$($config.accessContract.businessUnit)-$($config.accessContract.useCaseName)-$($config.accessContract.environment)-SUB-01"
+            $key = (Invoke-CheckedCommand az @('rest', '--method', 'post', '--query', 'primaryKey', '--output', 'tsv', '--url', "https://management.azure.com/subscriptions/$($config.subscriptionId)/resourceGroups/$($config.governanceHub.resourceGroupName)/providers/Microsoft.ApiManagement/service/$($targets.ApimName)/subscriptions/$subscriptionName/listSecrets?api-version=2024-05-01") | Out-String).Trim()
+            if (-not $key) { throw "The access contract subscription $subscriptionName returned no key." }
+            $env:HUB_GATEWAY_URL = $gatewayUrl
+            $env:HUB_API_KEY = $key
+            Invoke-CheckedCommand az @('deployment', 'group', 'create', '--subscription', $config.subscriptionId, '--resource-group', $config.foundry.resourceGroupName, '--name', 'hub-model-connection', '--parameters', $hubConnectionParameters, '--output', 'none')
+            Write-Host "Deployed access contract and project connection $($config.accessContract.connectionNamePrefix)-LLM -> $gatewayUrl/$($config.accessContract.foundryBasePath)."
         }
         'WebIq' {
             if (-not $env:WEBIQ_API_KEY) { throw 'Set WEBIQ_API_KEY to the approved Web IQ API key.' }

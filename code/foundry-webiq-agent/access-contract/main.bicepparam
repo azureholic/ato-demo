@@ -42,34 +42,8 @@ param services = [
 
 param productTerms = 'Read-only public-web research agent. Prompts may contain public queries only; no confidential enterprise content.'
 
-// Creates the project connection '<connectionNamePrefix>-LLM' used as '<connection>/<model>' by the agent.
-param useTargetFoundry = true
-param foundry = {
-  subscriptionId: config.subscriptionId
-  resourceGroupName: config.foundry.resourceGroupName
-  accountName: readEnvironmentVariable('FOUNDRY_ACCOUNT_NAME')
-  projectName: readEnvironmentVariable('FOUNDRY_PROJECT_NAME')
-}
-
-// ApiKey keeps the contract independent of the Hub's JWT named values. ProjectManagedIdentity
-// additionally requires jwtRequired/jwtAudience in the product policy and the project MI client ID.
-// universal-llm-api is the OpenAI v1 style API at <gateway>/models: the model travels in the request
-// body and no api-version is sent. The legacy azure-openai-api route 404s for the Hub's Foundry pools.
-param foundryConfig = {
-  connectionNamePrefix: config.accessContract.connectionNamePrefix
-  authType: 'ApiKey'
-  deploymentInPath: 'false'
-  isSharedToAll: true
-  staticModels: [
-    {
-      name: config.model.name
-      properties: {
-        model: {
-          name: config.model.name
-          version: config.model.version
-          format: 'OpenAI'
-        }
-      }
-    }
-  ]
-}
+// The Foundry project connection is created by Invoke-WebIqAgent.ps1 (infra/hub-model-connection.bicep), not by
+// this template: the upstream module targets '<gateway>/<api path>', but the OpenAI-compatible routes of
+// unified-ai-api live under '<gateway>/unified-ai/v1'. The ApiKey auth type keeps the contract independent of
+// the Hub's JWT named values; ProjectManagedIdentity would also need jwtRequired/jwtAudience in the product policy.
+param useTargetFoundry = false

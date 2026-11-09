@@ -16,7 +16,8 @@
     "businessUnit": "Platform",
     "useCaseName": "WebResearch",
     "environment": "DEMO",
-    "apiName": "universal-llm-api",
+    "apiName": "unified-ai-api",
+    "foundryBasePath": "unified-ai/v1",
     "connectionNamePrefix": "govhub-web-research"
   },
   "model": {
