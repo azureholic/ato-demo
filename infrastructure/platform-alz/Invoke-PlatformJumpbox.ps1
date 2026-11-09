@@ -1,15 +1,15 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-  Deploys the platform jumpbox: a hub subnet, Bastion Developer and an Ubuntu VM that can reach private APIM and Foundry.
+  Deploys the platform jumpbox: a hub subnet, Bastion Developer and a Windows Server desktop VM that can reach private APIM and Foundry.
 .DESCRIPTION
   Validate  Compile the templates. No Azure calls.
-  Deploy    Firewall egress rules for the jumpbox subnet, then the subnet/NSG/VM/Bastion Developer, then the Azure CLI
-            install (idempotent), then Check. Do not edit jumpbox-cloud-init.yaml on an existing VM: Azure rejects
-            customData changes; put new tooling in jumpbox-tools.sh instead.
+  Deploy    Firewall egress rules for the jumpbox subnet, then the subnet/NSG/VM/Bastion Developer, then the tools install
+            (Azure CLI and the hub-check helper, idempotent), then Check.
   Check     From inside the VM (Azure run command, no Bastion needed) verify the configured endpoints resolve to
             private addresses and answer over HTTPS.
-  The administrator SSH public key comes from JUMPBOX_SSH_PUBLIC_KEY; password authentication is disabled.
+  The local administrator password comes from JUMPBOX_ADMIN_PASSWORD and is read by the bicepparam file, so it is never
+  written to a parameter file or passed on a command line. Connect with Bastion Developer (RDP) from the Azure portal.
 #>
 [CmdletBinding()]
 param(
@@ -56,28 +56,33 @@ function Build-Templates {
     return $built
 }
 
-function Install-JumpboxTools {
+function Invoke-VmScript {
+    param([string]$ScriptPath)
     $global:LASTEXITCODE = 0
-    $result = & az vm run-command invoke --subscription $config.subscriptionId --resource-group $config.resourceGroupName `
-        --name $config.vm.name --command-id RunShellScript --scripts "@$(Join-Path $configRoot 'jumpbox-tools.sh')" `
-        --query 'value[0].message' --output tsv
-    if ($LASTEXITCODE -ne 0) { throw "Installing tools on $($config.vm.name) failed with exit code $LASTEXITCODE." }
-    $text = $result -join "`n"
-    if ($text -notmatch 'azure-cli (already )?installed') { throw "The Azure CLI is not installed on the jumpbox:`n$text" }
-    Write-Host ($text -split "`n" | Where-Object { $_ -match 'azure-cli' } | Select-Object -Last 1).Trim()
+    $raw = & az vm run-command invoke --subscription $config.subscriptionId --resource-group $config.resourceGroupName `
+        --name $config.vm.name --command-id RunPowerShellScript --scripts "@$ScriptPath" --query 'value[0].message' --output tsv
+    if ($LASTEXITCODE -ne 0) { throw "Run command on $($config.vm.name) failed with exit code $LASTEXITCODE." }
+    return ($raw -join "`n")
+}
+
+function Install-JumpboxTools {
+    $targets = (@($config.connectivityTargets) | ForEach-Object { "'$_'" }) -join ','
+    $script = (Get-Content (Join-Path $configRoot 'jumpbox-tools.ps1') -Raw).Replace('__TARGETS__', $targets)
+    $path = Join-Path $OutputPath 'jumpbox-tools.rendered.ps1'
+    Set-Content $path $script
+    $text = Invoke-VmScript $path
+    if ($text -notmatch 'azure-cli installed') { throw "The jumpbox tools were not installed:`n$text" }
+    Write-Host ($text -split "`n" | Where-Object { $_ -match 'azure-cli installed' } | Select-Object -Last 1).Trim()
 }
 
 function Test-JumpboxConnectivity {
-    $vm = $config.vm.name
-    $script = 'timeout 600 cloud-init status --wait >/dev/null 2>&1; /usr/local/bin/hub-check'
-    $global:LASTEXITCODE = 0
-    $raw = & az vm run-command invoke --subscription $config.subscriptionId --resource-group $config.resourceGroupName `
-        --name $vm --command-id RunShellScript --scripts $script --query 'value[0].message' --output tsv
-    if ($LASTEXITCODE -ne 0) { throw "Run command on $vm failed with exit code $LASTEXITCODE." }
-    $lines = @(($raw -join "`n") -split "`n" | Where-Object { $_ -match '\[(private|PUBLIC|unresolved)\]' })
+    $path = Join-Path $OutputPath 'jumpbox-check.ps1'
+    Set-Content $path "& 'C:\ProgramData\jumpbox\hub-check.ps1'"
+    $text = Invoke-VmScript $path
+    $lines = @($text -split "`n" | Where-Object { $_ -match '\[(private|PUBLIC|unresolved)\]' })
     $lines | ForEach-Object { Write-Host $_.Trim() }
     if ($lines.Count -ne @($config.connectivityTargets).Count) {
-        throw "Expected a result for each of $(@($config.connectivityTargets).Count) endpoints but got $($lines.Count). The VM bootstrap may still be running or hub-check is missing."
+        throw "Expected a result for each of $(@($config.connectivityTargets).Count) endpoints but got $($lines.Count). The tools install may not have run.`n$text"
     }
     $bad = @($lines | Where-Object { $_ -notmatch '\[private\]' -or $_ -match '=> 000' })
     if ($bad.Count -gt 0) {
@@ -88,6 +93,15 @@ function Test-JumpboxConnectivity {
 
 $templates = Build-Templates
 if ($Mode -eq 'Validate') {
+    # Compiled parameters embed secure values, so use a placeholder and keep the output out of the repository.
+    $saved = $env:JUMPBOX_ADMIN_PASSWORD
+    $env:JUMPBOX_ADMIN_PASSWORD = 'Validate-only-1!'
+    try {
+        Invoke-CheckedCommand az @('bicep', 'build-params', '--file', (Join-Path $configRoot 'jumpbox.bicepparam'), '--outfile', (Join-Path $OutputPath 'jumpbox.parameters.json'))
+    } finally {
+        $env:JUMPBOX_ADMIN_PASSWORD = $saved
+        Remove-Item (Join-Path $OutputPath 'jumpbox.parameters.json') -Force -ErrorAction SilentlyContinue
+    }
     Write-Host 'Jumpbox templates compiled; no Azure resources changed.'
     return
 }
@@ -97,19 +111,13 @@ if ($Mode -eq 'Check') {
     return
 }
 
-$key = $env:JUMPBOX_SSH_PUBLIC_KEY
-if ([string]::IsNullOrWhiteSpace($key) -or $key -notmatch '^ssh-(ed25519|rsa) [A-Za-z0-9+/=]+( [^\r\n]*)?$') {
-    throw 'Set JUMPBOX_SSH_PUBLIC_KEY to a single-line ssh-ed25519 or ssh-rsa public key.'
+$password = $env:JUMPBOX_ADMIN_PASSWORD
+if ([string]::IsNullOrWhiteSpace($password) -or $password.Length -lt 14 -or $password.Length -gt 123 -or
+    @('[a-z]', '[A-Z]', '\d', '[^a-zA-Z0-9]' | Where-Object { $password -match $_ }).Count -lt 4) {
+    throw 'Set JUMPBOX_ADMIN_PASSWORD to a 14-123 character password with upper, lower, digit and special characters.'
 }
-$parameters = @{
-    '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
-    contentVersion = '1.0.0.0'
-    parameters = @{ adminPublicKey = @{ value = $key.Trim() } }
-}
-$parameterPath = Join-Path $OutputPath 'jumpbox.parameters.json'
-$parameters | ConvertTo-Json -Depth 10 | Set-Content $parameterPath
 
-# Firewall rules first so the VM's first-boot package installs can pass the firewall.
+# Firewall rules first so the VM's downloads can pass the firewall from first boot.
 Invoke-CheckedCommand az @(
     'deployment', 'group', 'create', '--subscription', $config.subscriptionId,
     '--resource-group', $config.hub.resourceGroupName, '--name', 'platform-jumpbox-egress',
@@ -117,9 +125,8 @@ Invoke-CheckedCommand az @(
 )
 Invoke-CheckedCommand az @(
     'deployment', 'sub', 'create', '--subscription', $config.subscriptionId, '--location', $config.location,
-    '--name', 'platform-jumpbox', '--template-file', $templates['jumpbox'],
-    '--parameters', "@$parameterPath", '--output', 'none'
+    '--name', 'platform-jumpbox', '--parameters', (Join-Path $configRoot 'jumpbox.bicepparam'), '--output', 'none'
 )
-Write-Host "Deployed jumpbox $($config.vm.name) in $($config.hub.vnetName)/$($config.subnet.name); connect with Bastion Developer from the Azure portal."
+Write-Host "Deployed jumpbox $($config.vm.name) in $($config.hub.vnetName)/$($config.subnet.name); connect with Bastion Developer (RDP) from the Azure portal."
 Install-JumpboxTools
 Test-JumpboxConnectivity

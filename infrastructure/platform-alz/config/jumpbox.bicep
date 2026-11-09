@@ -5,8 +5,9 @@ targetScope = 'subscription'
 
 var config = loadJsonContent('./jumpbox.json')
 
-@description('SSH public key for the VM administrator. Password authentication is disabled.')
-param adminPublicKey string
+@secure()
+@description('Local administrator password of the Windows VM; supplied from JUMPBOX_ADMIN_PASSWORD.')
+param adminPassword string
 
 resource group 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: config.resourceGroupName
@@ -45,12 +46,13 @@ module host './jumpbox-vm.bicep' = {
     vmName: config.vm.name
     vmSize: config.vm.size
     adminUsername: config.vm.adminUsername
-    adminPublicKey: adminPublicKey
+    adminPassword: adminPassword
     osDiskSku: config.vm.osDiskSku
+    osDiskSizeGB: config.vm.osDiskSizeGB
+    image: config.vm.image
     subnetId: subnet.outputs.subnetId
     vnetId: subnet.outputs.vnetId
     bastionName: config.bastionName
-    cloudInit: replace(loadTextContent('./jumpbox-cloud-init.yaml'), '__TARGETS__', join(config.connectivityTargets, ' '))
   }
 }
 

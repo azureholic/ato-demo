@@ -3,12 +3,14 @@ param tags object
 param vmName string
 param vmSize string
 param adminUsername string
-param adminPublicKey string
+@secure()
+param adminPassword string
 param osDiskSku string
+param osDiskSizeGB int
+param image object
 param subnetId string
 param vnetId string
 param bastionName string
-param cloudInit string
 
 resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   name: 'nic-${vmName}'
@@ -27,6 +29,7 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   }
 }
 
+// Windows Server with Desktop Experience (the Azure Edition image is not Server Core).
 resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   name: vmName
   location: location
@@ -34,32 +37,21 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   properties: {
     hardwareProfile: { vmSize: vmSize }
     storageProfile: {
-      imageReference: {
-        publisher: 'Canonical'
-        offer: 'ubuntu-24_04-lts'
-        sku: 'server'
-        version: 'latest'
-      }
+      imageReference: image
       osDisk: {
         createOption: 'FromImage'
         deleteOption: 'Delete'
+        diskSizeGB: osDiskSizeGB
         managedDisk: { storageAccountType: osDiskSku }
       }
     }
     osProfile: {
       computerName: vmName
       adminUsername: adminUsername
-      customData: base64(cloudInit)
-      linuxConfiguration: {
-        disablePasswordAuthentication: true
-        ssh: {
-          publicKeys: [
-            {
-              path: '/home/${adminUsername}/.ssh/authorized_keys'
-              keyData: adminPublicKey
-            }
-          ]
-        }
+      adminPassword: adminPassword
+      windowsConfiguration: {
+        provisionVMAgent: true
+        enableAutomaticUpdates: true
       }
     }
     networkProfile: {

@@ -16,9 +16,16 @@
   "bastionName": "bas-hub-swe-developer",
   "vm": {
     "name": "vm-jumpbox-swe",
-    "size": "Standard_B2s_v2",
+    "size": "Standard_B4s_v2",
     "adminUsername": "azureuser",
-    "osDiskSku": "StandardSSD_LRS"
+    "osDiskSku": "StandardSSD_LRS",
+    "osDiskSizeGB": 128,
+    "image": {
+      "publisher": "MicrosoftWindowsServer",
+      "offer": "WindowsServer",
+      "sku": "2022-datacenter-azure-edition",
+      "version": "latest"
+    }
   },
   "connectivityTargets": [
     "apim-jmj2kuossnei2.azure-api.net",
@@ -27,11 +34,16 @@
   "egressFqdns": [
     "login.microsoftonline.com",
     "*.login.microsoftonline.com",
+    "*.microsoftonline.com",
+    "*.msauth.net",
+    "*.msftauth.net",
     "management.azure.com",
-    "packages.microsoft.com",
-    "archive.ubuntu.com",
-    "azure.archive.ubuntu.com",
-    "security.ubuntu.com",
+    "portal.azure.com",
+    "*.portal.azure.com",
+    "ai.azure.com",
+    "*.ai.azure.com",
+    "aka.ms",
+    "azcliprod.blob.core.windows.net",
     "pypi.org",
     "files.pythonhosted.org"
   ],

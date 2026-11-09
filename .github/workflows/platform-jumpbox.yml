@@ -50,5 +50,5 @@ jobs:
         run: .\platform-alz\Invoke-PlatformJumpbox.ps1 -Mode Validate -OutputPath "$env:RUNNER_TEMP\jumpbox-validate"
       - name: Deploy jumpbox, firewall egress and verify private reachability
         env:
-          JUMPBOX_SSH_PUBLIC_KEY: ${{ vars.JUMPBOX_SSH_PUBLIC_KEY }}
+          JUMPBOX_ADMIN_PASSWORD: ${{ secrets.JUMPBOX_ADMIN_PASSWORD }}
         run: .\platform-alz\Invoke-PlatformJumpbox.ps1 -Mode Deploy -OutputPath "$env:RUNNER_TEMP\jumpbox"

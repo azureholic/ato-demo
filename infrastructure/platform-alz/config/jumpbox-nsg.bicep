@@ -2,8 +2,8 @@ param name string
 param location string
 param tags object
 
-// Bastion Developer reaches the VM from the Azure platform address 168.63.129.16, which the VirtualNetwork
-// tag covers. Everything else inbound stays denied by the default rules.
+// RDP only, from the VirtualNetwork tag, which covers the Azure platform address (168.63.129.16) that Bastion
+// Developer connects from. Everything else inbound stays denied by the default rules.
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: name
   location: location
@@ -11,7 +11,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   properties: {
     securityRules: [
       {
-        name: 'AllowSshFromVirtualNetwork'
+        name: 'AllowRdpFromVirtualNetwork'
         properties: {
           priority: 100
           direction: 'Inbound'
@@ -20,7 +20,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
           sourceAddressPrefix: 'VirtualNetwork'
           sourcePortRange: '*'
           destinationAddressPrefix: '*'
-          destinationPortRange: '22'
+          destinationPortRange: '3389'
         }
       }
     ]
