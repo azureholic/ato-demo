@@ -127,6 +127,13 @@ def test_approval_continues_in_the_same_conversation_and_denies_unlisted_tools(c
     assert fake.deleted == ["conv-1"]
 
 
+def test_follow_up_turns_reuse_the_conversation(config):
+    fake = FakeOpenAI([_response([]), _response([])])
+    ask_agent(fake, "first", config, True, lambda prompt: False, ("second",))
+    assert fake.inputs == ["first", "second"]
+    assert fake.deleted == ["conv-1"]
+
+
 def test_failed_response_is_reported_and_conversation_cleaned_up(config):
     fake = FakeOpenAI([_response([], status="failed")])
     with pytest.raises(RuntimeError, match="failed"):

@@ -188,7 +188,12 @@ try {
             }
             Invoke-CheckedCommand $python @('-m', 'webiq_agent.publish', '--config', $ConfigPath)
             if ($SmokeQuestion) {
-                Invoke-CheckedCommand $python @('-m', 'webiq_agent.invoke', '--config', $ConfigPath, '--auto-approve-allowed-tools', $SmokeQuestion)
+                Invoke-CheckedCommand $python @(
+                    '-m', 'webiq_agent.invoke', '--config', $ConfigPath, '--auto-approve-allowed-tools',
+                    '--follow-up', 'Summarize your previous answer in one sentence.',
+                    '--follow-up', 'Which of the sources you cited is the most authoritative, and why?',
+                    $SmokeQuestion
+                )
             }
         }
     }

@@ -48,22 +48,31 @@ def _approval_response(request_id: str, approve: bool) -> dict[str, Any]:
     return {"type": "mcp_approval_response", "approval_request_id": request_id, "approve": approve}
 
 
-def ask_agent(openai: Any, question: str, config: AgentConfig, auto_approve: bool, ask: Callable[[str], bool]) -> Any:
+def ask_agent(
+    openai: Any,
+    question: str,
+    config: AgentConfig,
+    auto_approve: bool,
+    ask: Callable[[str], bool],
+    follow_ups: tuple[str, ...] = (),
+) -> Any:
     conversation = openai.conversations.create()
     try:
-        response = openai.responses.create(conversation=conversation.id, input=question)
-        for _ in range(MAX_APPROVAL_ROUNDS):
-            requests = pending_approvals(response)
-            if not requests:
-                break
-            decisions = [
-                _approval_response(r.id, decide_approval(r, config, auto_approve, ask)) for r in requests
-            ]
-            response = openai.responses.create(conversation=conversation.id, input=decisions)
-        else:
-            raise RuntimeError(f"Agent still requested approvals after {MAX_APPROVAL_ROUNDS} rounds.")
-        if getattr(response, "status", "completed") != "completed":
-            raise RuntimeError(f"Agent response ended with status {response.status}: {getattr(response, 'error', None)}")
+        response = None
+        for turn in (question, *follow_ups):
+            response = openai.responses.create(conversation=conversation.id, input=turn)
+            for _ in range(MAX_APPROVAL_ROUNDS):
+                requests = pending_approvals(response)
+                if not requests:
+                    break
+                decisions = [
+                    _approval_response(r.id, decide_approval(r, config, auto_approve, ask)) for r in requests
+                ]
+                response = openai.responses.create(conversation=conversation.id, input=decisions)
+            else:
+                raise RuntimeError(f"Agent still requested approvals after {MAX_APPROVAL_ROUNDS} rounds.")
+            if getattr(response, "status", "completed") != "completed":
+                raise RuntimeError(f"Agent response ended with status {response.status}: {getattr(response, 'error', None)}")
         return response
     finally:
         openai.conversations.delete(conversation_id=conversation.id)
@@ -83,6 +92,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Non-interactively approve only the configured Web IQ tools; deny every other request.",
     )
+    parser.add_argument(
+        "--follow-up",
+        action="append",
+        default=[],
+        help="Additional turn(s) sent in the same conversation; proves multi-turn replay through the Hub.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -90,7 +105,9 @@ def main(argv: list[str] | None = None) -> int:
         endpoint = project_endpoint(args.endpoint)
         with AIProjectClient(endpoint=endpoint, credential=DefaultAzureCredential(), allow_preview=True) as project:
             with project.get_openai_client(agent_name=config.agent_name) as openai:
-                response = ask_agent(openai, args.question, config, args.auto_approve_allowed_tools, _interactive_ask)
+                response = ask_agent(
+                    openai, args.question, config, args.auto_approve_allowed_tools, _interactive_ask, tuple(args.follow_up)
+                )
     except (ConfigError, HttpResponseError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
