@@ -3,7 +3,9 @@
 A separate Sweden Central scenario in the Governance Hub subscription:
 `rg-github-runner-swe`, `vnet-github-runner-swe` (`10.190.0.0/23`),
 an internal workload-profile Container Apps environment, an event-driven ephemeral
-Container App Job, private Premium ACR, private Key Vault and private monitoring.
+Container App Job, private Premium ACR, private Key Vault and a Log Analytics workspace
+with Application Insights. Monitoring is public (no Azure Monitor Private Link Scope);
+Application Insights allows Entra authentication only.
 Subnets use the platform firewall at `10.100.0.4`; platform DNS remains in `rg-dns`.
 
 Sweden Central is intentional: managed VNet-connected ACR task pools are

@@ -17,8 +17,9 @@ composition, validation and private post-provision hooks. It does not deploy age
   Azure-provided DNS is used; peering alone is not DNS forwarding.
 - Hosted-agent prerequisites, not an application deployment. The approved delegated
   `HOSTED_AGENT_RESOURCE_SCOPE` is required; no audience is guessed.
-- Private ACR, workspace, Application Insights and AMPLS are reused from the Sweden
-  runner scenario, avoiding unsupported Italy ACR pools and conflicting shared AMPLS DNS.
+- Private ACR, plus the workspace and Application Insights, are reused from the Sweden
+  runner scenario, avoiding unsupported Italy ACR pools. Monitoring is public (no AMPLS and
+  no monitor DNS zones); upstream's private Log Analytics option stays off.
 - Foundry IQ uses minimal extraction because standard extraction requires Content
   Understanding, which the upstream preflight does not support in Italy North.
   Scanned and image-only PDFs will not be searchable without OCR. Changing extraction

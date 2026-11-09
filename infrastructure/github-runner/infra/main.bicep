@@ -129,15 +129,12 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   properties: {
     sku: { name: 'PerGB2018' }
     retentionInDays: 30
-    publicNetworkAccessForIngestion: 'Disabled'
-    publicNetworkAccessForQuery: 'Disabled'
+    // Monitoring does not need private access: no Azure Monitor Private Link Scope, and no private
+    // monitor DNS zones in the platform (a linked privatelink.monitor zone without matching records
+    // breaks Azure Monitor name resolution for every VNet linked to it).
+    publicNetworkAccessForIngestion: 'Enabled'
+    publicNetworkAccessForQuery: 'Enabled'
   }
-}
-resource monitorScope 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = {
-  name: 'ampls-github-runner'
-  location: 'global'
-  tags: config.tags
-  properties: { accessModeSettings: { ingestionAccessMode: 'PrivateOnly', queryAccessMode: 'PrivateOnly' } }
 }
 resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   name: 'appi-github-runner'
@@ -148,40 +145,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
     Application_Type: 'web'
     WorkspaceResourceId: workspace.id
     DisableLocalAuth: true
-    publicNetworkAccessForIngestion: 'Disabled'
-    publicNetworkAccessForQuery: 'Disabled'
-  }
-}
-resource monitorInsights 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = {
-  parent: monitorScope
-  name: 'runner-insights'
-  properties: { linkedResourceId: appInsights.id }
-}
-resource monitorWorkspace 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = {
-  parent: monitorScope
-  name: 'runner-workspace'
-  properties: { linkedResourceId: workspace.id }
-}
-resource monitorEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
-  name: 'pe-github-monitor'
-  location: config.location
-  tags: config.tags
-  properties: {
-    subnet: { id: peSubnetId }
-    privateLinkServiceConnections: [
-      { name: 'monitor', properties: { privateLinkServiceId: monitorScope.id, groupIds: ['azuremonitor'] } }
-    ]
-  }
-  dependsOn: [monitorWorkspace, monitorInsights, privateEndpoints]
-}
-resource monitorZones 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
-  parent: monitorEndpoint
-  name: 'platform'
-  properties: {
-    privateDnsZoneConfigs: [for zone in [dns.zones.azureMonitor, dns.zones.omsOpsInsights, dns.zones.odsOpsInsights, dns.zones.azureAutomation]: {
-      name: replace(zone, '.', '-')
-      properties: { privateDnsZoneId: '${dnsId}/${zone}' }
-    }]
+    publicNetworkAccessForIngestion: 'Enabled'
+    publicNetworkAccessForQuery: 'Enabled'
   }
 }
 resource environment 'Microsoft.App/managedEnvironments@2025-07-01' = {

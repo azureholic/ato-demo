@@ -67,10 +67,16 @@ for permissions, execution order and migration cautions.
 
 The [agent scenario](../ai-agent/README.md) and
 [reusable private runner](../github-runner/README.md) also consume this inventory.
-Additional Search, App Configuration, ACR, region-specific Container Apps and
-private-monitoring zones remain centrally owned. Their spoke preparation only
-links existing zones. All workloads sharing the private-monitoring DNS network
-reuse one AMPLS rather than creating competing scopes.
+Additional Search, App Configuration, ACR and region-specific Container Apps
+zones remain centrally owned. Their spoke preparation only links existing zones.
+Monitoring is deliberately **not** private: there are no Azure Monitor Private Link
+Scopes and no `privatelink.monitor`, `oms`/`ods.opinsights`, `agentsvc` or
+`applicationinsights` zones. Log Analytics and Application Insights accept public
+ingestion and query (Application Insights uses Entra authentication only), and the
+firewall's `AzureMonitor` service tag carries telemetry from the private spokes.
+Do not add monitor zones to a VNet unless every monitored resource in that network
+is in a scope, because a linked zone without matching records breaks Azure Monitor
+name resolution.
 
 For an existing platform, run the separately approved
 [workload connectivity workflow](../../.github/workflows/platform-workload-connectivity.yml)

@@ -34,12 +34,7 @@
     "existingPrivateDnsZoneKeyVaultResourceId": "keyVault",
     "existingPrivateDnsZoneAppConfigResourceId": "appConfig",
     "existingPrivateDnsZoneContainerAppsResourceId": "containerAppsItaly",
-    "existingPrivateDnsZoneAcrResourceId": "containerRegistry",
-    "existingPrivateDnsZoneAzureMonitorResourceId": "azureMonitor",
-    "existingPrivateDnsZoneOmsOpsInsightsResourceId": "omsOpsInsights",
-    "existingPrivateDnsZoneOdsOpsInsightsResourceId": "odsOpsInsights",
-    "existingPrivateDnsZoneAzureAutomationResourceId": "azureAutomation",
-    "existingPrivateDnsZoneAppInsightsResourceId": "appInsights"
+    "existingPrivateDnsZoneAcrResourceId": "containerRegistry"
   },
   "environment": {
     "AGENTLZ_APP_ID": "agent-lz-default",

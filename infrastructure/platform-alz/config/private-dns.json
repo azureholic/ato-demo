@@ -25,11 +25,6 @@
     "appConfig": "privatelink.azconfig.io",
     "containerRegistry": "privatelink.azurecr.io",
     "containerAppsItaly": "privatelink.italynorth.azurecontainerapps.io",
-    "containerAppsSweden": "privatelink.swedencentral.azurecontainerapps.io",
-    "azureMonitor": "privatelink.monitor.azure.com",
-    "omsOpsInsights": "privatelink.oms.opinsights.azure.com",
-    "odsOpsInsights": "privatelink.ods.opinsights.azure.com",
-    "azureAutomation": "privatelink.agentsvc.azure.automation.net",
-    "appInsights": "privatelink.applicationinsights.io"
+    "containerAppsSweden": "privatelink.swedencentral.azurecontainerapps.io"
   }
 }
