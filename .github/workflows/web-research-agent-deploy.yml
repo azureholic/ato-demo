@@ -1,0 +1,128 @@
+name: Deploy Web IQ research agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_contract:
+        description: Deploy the Citadel access contract and Hub model connection
+        type: boolean
+        default: true
+      deploy_web_iq_connection:
+        description: Deploy the Web IQ MCP project connection (needs the WEBIQ_API_KEY environment secret)
+        type: boolean
+        default: true
+      publish_agent:
+        description: Publish a new prompt-agent version from the private runner
+        type: boolean
+        default: true
+      smoke_question:
+        description: Public, non-confidential question for the post-publish smoke test (empty skips it)
+        type: string
+        default: What is Microsoft Web IQ? Cite sources.
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: web-research-agent
+  cancel-in-progress: false
+
+jobs:
+  infrastructure:
+    name: Access contract and Web IQ connection (approval required)
+    if: ${{ inputs.deploy_contract || inputs.deploy_web_iq_connection }}
+    runs-on: windows-latest
+    environment: demo
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify approval gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          . ./infrastructure/shared-infrastructure/Deployment.ps1
+          Assert-DeploymentGate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run unit tests
+        working-directory: code/foundry-webiq-agent
+        run: |
+          python -m pip install --quiet -r requirements.txt -r requirements-dev.txt
+          python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed.' }
+      - name: Install Bicep CLI
+        run: |
+          az bicep install
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep CLI installation failed.' }
+      - name: Validate templates
+        run: ./code/foundry-webiq-agent/Invoke-WebIqAgent.ps1 -Mode Validate -OutputPath "$env:RUNNER_TEMP/web-research-validate"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: 9fd780c4-e4ec-4204-83b9-cedca2c91b8e
+      - name: Deploy access contract and Hub model connection
+        if: ${{ inputs.deploy_contract }}
+        run: ./code/foundry-webiq-agent/Invoke-WebIqAgent.ps1 -Mode Contract -OutputPath "$env:RUNNER_TEMP/web-research-contract"
+      - name: Deploy Web IQ project connection
+        if: ${{ inputs.deploy_web_iq_connection }}
+        env:
+          WEBIQ_API_KEY: ${{ secrets.WEBIQ_API_KEY }}
+        run: ./code/foundry-webiq-agent/Invoke-WebIqAgent.ps1 -Mode WebIq -OutputPath "$env:RUNNER_TEMP/web-research-webiq"
+      - name: Remove generated checkout
+        if: always()
+        run: |
+          foreach ($name in 'web-research-validate', 'web-research-contract') {
+            $path = Join-Path $env:RUNNER_TEMP $name
+            if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+          }
+
+  agent:
+    name: Publish prompt agent (approval required)
+    if: ${{ always() && inputs.publish_agent && !cancelled() && !contains(needs.*.result, 'failure') }}
+    needs: infrastructure
+    runs-on: [self-hosted, linux, x64, private-azure]
+    environment: demo
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recheck trusted deployment gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          . ./infrastructure/shared-infrastructure/Deployment.ps1
+          Assert-DeploymentGate
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: 9fd780c4-e4ec-4204-83b9-cedca2c91b8e
+      - name: Publish agent version and run smoke test
+        env:
+          SMOKE_QUESTION: ${{ inputs.smoke_question }}
+        run: |
+          ./code/foundry-webiq-agent/Invoke-WebIqAgent.ps1 -Mode Agent `
+            -OutputPath (Join-Path $env:RUNNER_TEMP 'web-research-agent') `
+            -SmokeQuestion $env:SMOKE_QUESTION
+      - name: Remove generated environment
+        if: always()
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'web-research-agent'
+          if (Test-Path $path) { Remove-Item -LiteralPath $path -Recurse -Force }

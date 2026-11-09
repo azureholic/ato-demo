@@ -1,0 +1,42 @@
+{
+  "upstreamRepository": "https://github.com/Azure-Samples/ai-hub-gateway-solution-accelerator.git",
+  "upstreamRevision": "81599b31dfbaee20ebd3a6d2ba9b07dde3c31814",
+  "subscriptionId": "9fd780c4-e4ec-4204-83b9-cedca2c91b8e",
+  "location": "italynorth",
+  "governanceHub": {
+    "resourceGroupName": "rg-ai-governance-ita",
+    "apimName": ""
+  },
+  "foundry": {
+    "resourceGroupName": "rg-ai-agent-foundry-ita",
+    "accountName": "",
+    "projectName": ""
+  },
+  "accessContract": {
+    "businessUnit": "Platform",
+    "useCaseName": "WebResearch",
+    "environment": "DEMO",
+    "apiName": "azure-openai-api",
+    "connectionNamePrefix": "govhub-web-research"
+  },
+  "model": {
+    "name": "gpt-6-astra",
+    "version": "2026-09-03",
+    "apiVersion": "2025-04-01-preview",
+    "tokensPerMinute": 10000,
+    "monthlyTokenQuota": 1000000
+  },
+  "webIq": {
+    "connectionName": "web-iq-mcp",
+    "serverUrl": "https://api.microsoft.ai/v3/mcp",
+    "serverLabel": "web_iq",
+    "apiKeyHeader": "x-apikey",
+    "allowedTools": ["web", "browse"]
+  },
+  "agent": {
+    "name": "web-research-agent",
+    "description": "Read-only public-web research assistant: Web IQ evidence, models via the AI Governance Hub.",
+    "instructionsFile": "agent/instructions.md",
+    "requireApproval": "always"
+  }
+}

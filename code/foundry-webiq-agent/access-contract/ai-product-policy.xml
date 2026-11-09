@@ -1,0 +1,27 @@
+<policies>
+    <inbound>
+        <base />
+        <include-fragment fragment-id="set-llm-requested-model" />
+
+        <!-- Model RBAC: this contract may only call the shared Hub model. Keep in sync with config/deployment.json. -->
+        <set-variable name="allowedModels" value="gpt-6-astra" />
+
+        <!-- Capacity: per-subscription throttle and monthly quota. Keep in sync with config/deployment.json. -->
+        <llm-token-limit counter-key="@(context.Subscription.Id)"
+                         tokens-per-minute="10000"
+                         estimate-prompt-tokens="false"
+                         token-quota="1000000"
+                         token-quota-period="Monthly" />
+
+        <set-variable name="enableResponseHeaders" value="@(true)" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
