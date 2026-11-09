@@ -114,6 +114,7 @@ try {
     foreach ($key in $environment.Keys) { Invoke-CheckedCommand azd @('env', 'set', $key, $environment[$key], '--no-prompt') }
     Invoke-CheckedCommand azd @('hooks', 'run', 'preup', '--no-prompt')
     Invoke-CheckedCommand azd @('provision', '--no-prompt')
+    & (Join-Path $PSScriptRoot 'Set-FoundryTraceIngestion.ps1') -ConfigPath $ConfigPath
     Write-Host 'Provisioned agent foundation and completed private post-provision configuration; no application images deployed.'
 } finally {
     if (Get-Variable oldPath -ErrorAction SilentlyContinue) { $env:PATH = $oldPath }

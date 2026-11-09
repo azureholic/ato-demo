@@ -20,6 +20,13 @@ composition, validation and private post-provision hooks. It does not deploy age
 - Private ACR, plus the workspace and Application Insights, are reused from the Sweden
   runner scenario, avoiding unsupported Italy ACR pools. Monitoring is public (no AMPLS and
   no monitor DNS zones); upstream's private Log Analytics option stays off.
+- The shared Application Insights resource disables key authentication, but upstream connects the
+  project to it with a key, so Foundry's server-side agent traces were rejected and the Traces view
+  stayed empty. [Set-FoundryTraceIngestion.ps1](Set-FoundryTraceIngestion.ps1) runs after provisioning:
+  it grants the Foundry project identity Monitoring Metrics Publisher on Application Insights and
+  switches the account's Application Insights connection to `ProjectManagedIdentity` (idempotent).
+  Viewing traces needs Log Analytics Reader on that resource, and the browser must reach the
+  Application Insights query endpoints (allowed for the jumpbox in `platform-alz/config/jumpbox.json`).
 - Foundry IQ uses minimal extraction because standard extraction requires Content
   Understanding, which the upstream preflight does not support in Italy North.
   Scanned and image-only PDFs will not be searchable without OCR. Changing extraction
