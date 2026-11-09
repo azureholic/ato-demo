@@ -106,9 +106,9 @@ Not tested against live Azure. Before first use, confirm in order:
    An earlier run showed a Foundry-originated request in the APIM logs while the gateway was still public;
    re-run `ModelCheck` after any networking change to confirm Foundry still reaches it privately.
 2. **Tool calling.** `gpt-6-astra` rejects function tools on Chat Completions, so tool use needs the Responses
-   API upstream. The Hub serves it at `POST /unified-ai/v1/responses` (rewritten to the backend's
-   `/openai/v1/responses`), but Foundry's "Use the Responses API for upstream requests" option wants a base
-   ending `/openai/v1` and its stored setting is not yet identified, so the connection still uses Chat Completions.
+   API upstream. The connection sets the metadata property `upstreamSurface: "responses"` (what the portal's
+   "Use the Responses API for upstream requests" option stores), so Foundry calls the Hub at
+   `POST /unified-ai/v1/responses` (rewritten to the backend's `/openai/v1/responses`) instead of `/chat/completions`.
    Run `ModelCheck` after any connection change to verify.
 3. **Web IQ.** The account is entitled to `web`/`browse`, the key works from Foundry's MCP execution
    path, and any firewall egress to `api.microsoft.ai` is approved (it is not in the current

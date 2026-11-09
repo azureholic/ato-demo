@@ -43,6 +43,9 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2026-03-01' exis
 
 // Same shape the upstream access-contract module writes for ApiKey connections, with an explicit base URL.
 // deploymentInPath 'false' puts the model name in the request body (OpenAI v1 style); no api-version is sent.
+// upstreamSurface 'responses' is the property behind the portal's "Use the Responses API for upstream requests":
+// Foundry then appends /responses to the target instead of /chat/completions. gpt-6-astra rejects function tools
+// on Chat Completions, so agent calls must reach the Hub's Responses route (<target>/responses).
 resource connection 'Microsoft.CognitiveServices/accounts/projects/connections@2026-03-01' = {
   parent: project
   name: connectionName
@@ -56,6 +59,7 @@ resource connection 'Microsoft.CognitiveServices/accounts/projects/connections@2
     }
     metadata: {
       deploymentInPath: 'false'
+      upstreamSurface: 'responses'
       customHeaders: '{}'
       models: string(staticModels)
     }
