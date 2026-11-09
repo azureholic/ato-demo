@@ -8,13 +8,15 @@
   WebIq     Deploy the Web IQ MCP project connection. Requires WEBIQ_API_KEY in the environment.
   Agent     Publish a new prompt-agent version, optionally followed by a smoke question that
             auto-approves only the configured Web IQ tools. Needs private data-plane access.
+  ModelCheck Publish a tool-less '<agent>-model-check' agent and verify completion and function tool
+            calling through the Governance Hub model connection. Works without the Web IQ connection.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [string]$OutputPath,
 
-    [ValidateSet('Validate', 'Contract', 'WebIq', 'Agent')]
+    [ValidateSet('Validate', 'Contract', 'WebIq', 'Agent', 'ModelCheck')]
     [string]$Mode = 'Validate',
 
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'config' 'deployment.json'),
@@ -160,13 +162,17 @@ try {
             Invoke-CheckedCommand az @('deployment', 'group', 'create', '--subscription', $config.subscriptionId, '--resource-group', $config.foundry.resourceGroupName, '--name', 'web-iq-connection', '--parameters', $webIqParameters, '--output', 'none')
             Write-Host "Deployed Web IQ project connection $($config.webIq.connectionName)."
         }
-        'Agent' {
+        { $_ -in 'Agent', 'ModelCheck' } {
             New-Item $OutputPath -ItemType Directory | Out-Null
             $venv = Join-Path $OutputPath '.venv'
             Invoke-CheckedCommand python @('-m', 'venv', $venv)
             $python = if ($IsWindows) { Join-Path $venv 'Scripts' 'python.exe' } else { Join-Path $venv 'bin' 'python' }
             Invoke-CheckedCommand $python @('-m', 'pip', 'install', '--quiet', '-r', (Join-Path $PSScriptRoot 'requirements.txt'))
             $env:PYTHONPATH = Join-Path $PSScriptRoot 'src'
+            if ($Mode -eq 'ModelCheck') {
+                Invoke-CheckedCommand $python @('-m', 'webiq_agent.model_check', '--config', $ConfigPath)
+                return
+            }
             Invoke-CheckedCommand $python @('-m', 'webiq_agent.publish', '--config', $ConfigPath)
             if ($SmokeQuestion) {
                 Invoke-CheckedCommand $python @('-m', 'webiq_agent.invoke', '--config', $ConfigPath, '--auto-approve-allowed-tools', $SmokeQuestion)

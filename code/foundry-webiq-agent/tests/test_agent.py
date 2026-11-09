@@ -123,3 +123,34 @@ def test_failed_response_is_reported_and_conversation_cleaned_up(config):
     with pytest.raises(RuntimeError, match="failed"):
         ask_agent(fake, "question", config, True, lambda prompt: False)
     assert fake.deleted == ["conv-1"]
+
+
+def _model_check_fake(outputs):
+    fake = FakeOpenAI(outputs)
+    return fake
+
+
+def _text_response(text, output=()):
+    return SimpleNamespace(output=list(output), output_text=text, status="completed", error=None)
+
+
+def test_model_check_passes_when_completion_and_function_call_work():
+    from webiq_agent.model_check import CHECK_VALUE, run_checks
+
+    call = SimpleNamespace(type="function_call", call_id="c1", name="get_check_value", arguments="{}")
+    fake = _model_check_fake([
+        _text_response("ready"),
+        _text_response("", [call]),
+        _text_response(f"The value is {CHECK_VALUE}"),
+    ])
+    assert run_checks(fake) == []
+    assert fake.inputs[2][0]["call_id"] == "c1"
+    assert fake.deleted == ["conv-1"]
+
+
+def test_model_check_reports_a_model_that_ignores_the_tool():
+    from webiq_agent.model_check import run_checks
+
+    fake = _model_check_fake([_text_response("ready"), _text_response("no tool")])
+    failures = run_checks(fake)
+    assert len(failures) == 1 and "function tool" in failures[0]
