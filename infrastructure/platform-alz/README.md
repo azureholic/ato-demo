@@ -265,7 +265,7 @@ subnets as child resources.
 | Piece | Details (config in [jumpbox.json](config/jumpbox.json)) |
 | --- | --- |
 | Subnet | `snet-jumpbox` `10.100.1.0/27` in the hub VNet `vnet-hub-swe`, with an NSG (SSH only from the VNet) and the Accelerator's `rt-hub-std-swe` route table (default route via the hub firewall). No default outbound access. |
-| VM | `vm-jumpbox-swe`, Ubuntu 24.04 LTS, `Standard_B2s_v2`, Trusted Launch, no public IP, SSH key only (no password). Tools installed at first boot: `curl`, `jq`, `dnsutils`, Python 3, Azure CLI. |
+| VM | `vm-jumpbox-swe`, Ubuntu 24.04 LTS, `Standard_B2s_v2`, Trusted Launch, no public IP, SSH key only (no password). Cloud-init adds `curl`, `jq`, `dnsutils`, Python 3 and `hub-check`; the deploy script then installs the Azure CLI from the Microsoft apt repository ([jumpbox-tools.sh](config/jumpbox-tools.sh), idempotent). Azure rejects `customData` changes on an existing VM, so add new tooling to that script, not to cloud-init. |
 | Bastion | **Developer SKU**: free, no `AzureBastionSubnet` or public IP, one connection at a time, portal only, and **only VMs in its own VNet**, so the VM is in the hub VNet, not a spoke. Available in Sweden Central. |
 | Egress | Dedicated firewall rule group `platform-jumpbox` (priority 320): Entra sign-in, Azure Resource Manager, Microsoft/Ubuntu package feeds and PyPI only. |
 | Private access | The hub VNet is peered directly with the GovHub, agent and runner spokes and linked to the shared private DNS zones, so `*.azure-api.net` and `*.services.ai.azure.com` resolve to private endpoints. |

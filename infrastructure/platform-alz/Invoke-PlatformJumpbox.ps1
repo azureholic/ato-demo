@@ -4,7 +4,9 @@
   Deploys the platform jumpbox: a hub subnet, Bastion Developer and an Ubuntu VM that can reach private APIM and Foundry.
 .DESCRIPTION
   Validate  Compile the templates. No Azure calls.
-  Deploy    Firewall egress rules for the jumpbox subnet, then the subnet/NSG/VM/Bastion Developer, then Check.
+  Deploy    Firewall egress rules for the jumpbox subnet, then the subnet/NSG/VM/Bastion Developer, then the Azure CLI
+            install (idempotent), then Check. Do not edit jumpbox-cloud-init.yaml on an existing VM: Azure rejects
+            customData changes; put new tooling in jumpbox-tools.sh instead.
   Check     From inside the VM (Azure run command, no Bastion needed) verify the configured endpoints resolve to
             private addresses and answer over HTTPS.
   The administrator SSH public key comes from JUMPBOX_SSH_PUBLIC_KEY; password authentication is disabled.
@@ -52,6 +54,17 @@ function Build-Templates {
         Invoke-CheckedCommand az @('bicep', 'build', '--file', (Join-Path $configRoot "$name.bicep"), '--outfile', $built[$name])
     }
     return $built
+}
+
+function Install-JumpboxTools {
+    $global:LASTEXITCODE = 0
+    $result = & az vm run-command invoke --subscription $config.subscriptionId --resource-group $config.resourceGroupName `
+        --name $config.vm.name --command-id RunShellScript --scripts "@$(Join-Path $configRoot 'jumpbox-tools.sh')" `
+        --query 'value[0].message' --output tsv
+    if ($LASTEXITCODE -ne 0) { throw "Installing tools on $($config.vm.name) failed with exit code $LASTEXITCODE." }
+    $text = $result -join "`n"
+    if ($text -notmatch 'azure-cli (already )?installed') { throw "The Azure CLI is not installed on the jumpbox:`n$text" }
+    Write-Host ($text -split "`n" | Where-Object { $_ -match 'azure-cli' } | Select-Object -Last 1).Trim()
 }
 
 function Test-JumpboxConnectivity {
@@ -108,4 +121,5 @@ Invoke-CheckedCommand az @(
     '--parameters', "@$parameterPath", '--output', 'none'
 )
 Write-Host "Deployed jumpbox $($config.vm.name) in $($config.hub.vnetName)/$($config.subnet.name); connect with Bastion Developer from the Azure portal."
+Install-JumpboxTools
 Test-JumpboxConnectivity
