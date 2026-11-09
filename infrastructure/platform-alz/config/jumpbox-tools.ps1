@@ -58,9 +58,8 @@ $version = (& $cli version --output json | ConvertFrom-Json).'azure-cli'
 for ($attempt = 1; $attempt -le 4; $attempt++) {
     $license = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationId='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1
     if ($license -and $license.LicenseStatus -eq 1) { break }
-    cscript //nologo C:\Windows\System32\slmgr.vbs /ato | Out-Null
+    $activation = Start-Process cscript.exe -ArgumentList '//nologo', 'C:\Windows\System32\slmgr.vbs', '/ato' -PassThru -WindowStyle Hidden
+    if (-not $activation.WaitForExit(120000)) { $activation.Kill() }
     Start-Sleep -Seconds 30
 }
-# Refreshes the Azure Edition activation state so a stale "deactivated" notice is cleared once the checks pass.
-if (Test-Path C:\Windows\System32\fclip.exe) { try { & C:\Windows\System32\fclip.exe | Out-Null } catch { } }
 "azure-cli installed: $version"
