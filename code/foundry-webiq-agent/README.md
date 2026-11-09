@@ -44,6 +44,9 @@ is `<connectionNamePrefix>-LLM`, created by the contract; `config.py` derives it
 
 1. The Agent Landing Zone and Governance Hub must already be deployed.
 2. In the protected GitHub `demo` environment, add the `WEBIQ_API_KEY` **secret** (approved Web IQ account).
+   Until the Web IQ connection exists, publishing falls back to Foundry's built-in web search tool
+   (`agent.webSearchFallback` in `config/deployment.json`); once the connection is deployed, the next publish
+   switches the agent to Web IQ automatically.
 3. Run [the workflow](../../.github/workflows/web-research-agent-deploy.yml) from `main`:
    1. `infrastructure` job (hosted runner): unit tests, template validation, access contract, Web IQ connection.
    2. `agent` job (private `private-azure` runner): publish the agent version and run the smoke question.

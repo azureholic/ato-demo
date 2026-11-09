@@ -41,6 +41,13 @@ def test_definition_attaches_only_allowed_web_iq_tools_with_approval(config):
     assert tool.require_approval == "always"
 
 
+def test_definition_without_web_iq_uses_the_builtin_web_search_tool(config):
+    definition = build_definition(config, use_web_iq=False)
+    assert config.web_search_fallback
+    assert [t.type for t in definition.tools] == ["web_search"]
+    assert definition.model == "govhub-web-research-LLM/gpt-6-astra"
+
+
 def test_empty_allowed_tools_is_rejected(tmp_path):
     path = _write_config(tmp_path, lambda raw: raw["webIq"].update(allowedTools=[]))
     with pytest.raises(ConfigError, match="allowedTools"):

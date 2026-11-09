@@ -38,6 +38,7 @@
     "description": "Read-only public-web research assistant: Web IQ evidence, models via the AI Governance Hub.",
     "instructionsFile": "agent/instructions.md",
     "requireApproval": "always",
+    "webSearchFallback": true,
     "reasoningEffort": "low"
   }
 }

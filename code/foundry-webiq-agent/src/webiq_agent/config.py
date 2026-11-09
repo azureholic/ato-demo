@@ -34,6 +34,7 @@ class AgentConfig:
     web_iq_server_url: str
     web_iq_server_label: str
     web_iq_allowed_tools: tuple[str, ...]
+    web_search_fallback: bool = False
 
     @property
     def model_deployment(self) -> str:
@@ -67,6 +68,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG) -> AgentConfig:
             web_iq_server_url=web_iq["serverUrl"],
             web_iq_server_label=web_iq["serverLabel"],
             web_iq_allowed_tools=tools,
+            web_search_fallback=bool(agent.get("webSearchFallback", False)),
         )
     except KeyError as exc:
         raise ConfigError(f"Missing configuration key {exc} in {path}.") from exc
