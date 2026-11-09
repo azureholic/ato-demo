@@ -11,7 +11,8 @@ New-Item $configPath -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $root 'config\main.bicepparam') $configPath
 $state = @{
     Failure = ''; Calls = [Collections.Generic.List[string]]::new(); ProviderReads = 0
-    Exemption = $null; SharedKey = $false; ApimPublicAccess = 'Enabled'
+    ApimPublicAccess = 'Enabled'; PoolPriorities = @(1, 1); PoolWrites = 0
+    Exemption = $null; SharedKey = $false
     StorageScope = "/subscriptions/$($originalConfig.subscriptionId)/resourceGroups/$($originalConfig.resourceGroupName)/providers/Microsoft.Storage/storageAccounts/funcusagetest123"
 }
 $previousLocation = Get-Location
@@ -100,6 +101,7 @@ function az {
         return
     }
     if ($args[0] -eq 'webapp') { return }
+    if ($args[0] -eq 'account') { 'test-token'; return }
     if ($args[0] -eq 'apim') {
         if ($args[1] -eq 'list') {
             ConvertTo-Json -InputObject @(if ($state.Failure -eq 'apim-multiple') { 'apim-a'; 'apim-b' } else { 'apim-govhub-test' })
@@ -195,6 +197,24 @@ function azd {
     }
     if ($state.Failure -eq $args[0]) { $global:LASTEXITCODE = 29 }
 }
+function Invoke-RestMethod {
+    param([string]$Method = 'Get', [string]$Uri, $Headers, [string]$Body)
+    $state.Calls.Add("arm $Method $Uri")
+    $member = { param($i) @{ id = "/backends/aif-test-$i"; weight = 100; priority = $state.PoolPriorities[$i] } }
+    if ($Method -eq 'Put') {
+        $services = @((ConvertFrom-Json $Body).properties.pool.services)
+        $state.PoolPriorities = @($services | ForEach-Object { $_.priority })
+        $state.PoolWrites++
+        return
+    }
+    [pscustomobject]@{ value = @(
+        [pscustomobject]@{ name = 'aif-test-0'; properties = [pscustomobject]@{ url = 'https://a' } }
+        [pscustomobject]@{ name = 'model-pool'; properties = [pscustomobject]@{
+            description = 'pool'; type = 'Pool'
+            pool = [pscustomobject]@{ services = @((& $member 0), (& $member 1)) }
+        } }
+    ) }
+}
 function Invoke-WebRequest {
     $state.Calls.Add("web $($args -join ' ')")
     [pscustomobject]@{ StatusCode = 404; Content = '{ "statusCode": 403, "message": "Request originated from client public IP address 203.0.113.5, public network access on this `Microsoft.ApiManagement/service/apim-govhub-test` is disabled." }' }
@@ -210,6 +230,8 @@ function Invoke-Case {
     $state.Exemption = $null
     $state.SharedKey = $false
     $state.ApimPublicAccess = 'Enabled'
+    $state.PoolPriorities = @(1, 1)
+    $state.PoolWrites = 0
     $originalConfig | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $configPath 'deployment.json')
     $path = Join-Path $testRoot $Name
     if ($Name -eq 'existing') { New-Item $path -ItemType Directory | Out-Null }
@@ -292,6 +314,11 @@ try {
     Assert ($patchIndex -gt $deployIndex) 'Public APIM access must be disabled only after provisioning and application deployment.'
     Assert ($calls[$patchIndex].Contains('/providers/Microsoft.ApiManagement/service/apim-govhub-test?api-version=') -and $state.ApimPublicAccess -eq 'Disabled') 'Disable public access on the single discovered APIM instance.'
     Assert (@($calls | Where-Object { $_ -like 'web *' }).Count -ge 1) 'Verify that the public gateway rejects callers.'
+    Assert ($state.PoolWrites -eq 1 -and $state.PoolPriorities[0] -eq 1 -and $state.PoolPriorities[1] -eq 2) 'Model backend pools must be active/standby so Responses conversations stay on one Foundry instance.'
+
+    $state.Calls.Clear()
+    & (Join-Path $root 'Set-ApimPoolFailover.ps1') -ConfigPath $configPath
+    Assert ($state.PoolWrites -eq 1) 'An already active/standby pool must cause no writes.'
 
     $state.Calls.Clear()
     & (Join-Path $root 'Set-ApimPrivateAccess.ps1') -ConfigPath $configPath -PollIntervalSeconds 1 -ProbeTimeoutSeconds 1

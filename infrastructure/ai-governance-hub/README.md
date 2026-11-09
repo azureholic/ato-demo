@@ -35,6 +35,10 @@ No Terraform or external deployment state storage is needed.
   when the waiver or account changes.
 - [Set-ApimPrivateAccess.ps1](Set-ApimPrivateAccess.ps1): after deployment, verify
   the APIM private endpoint and shared DNS record, then disable public network access.
+- [Set-ApimPoolFailover.ps1](Set-ApimPoolFailover.ps1): after deployment, make each model backend pool
+  active/standby (first Foundry instance serves all traffic). The upstream pool load-balances equally across
+  both regions, which breaks multi-turn Responses conversations (`invalid_encrypted_content`) because encrypted
+  reasoning items can only be decrypted by the instance that produced them.
 - [spoke.bicep](networking/spoke.bicep) and [peering.bicep](networking/peering.bicep):
   small integration templates reusing the pinned upstream VNet module.
 - [private-dns-links.bicep](../platform-alz/config/private-dns-links.bicep):
